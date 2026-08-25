@@ -487,6 +487,20 @@ go run .
 go run . -headless=false
 ```
 
+**Enable ChineseInLA alongside RedNote**:
+
+The same `/mcp` endpoint registers both RedNote and ChineseInLA tools. ChineseInLA has its own browser profile, login state, CDP port (default `9223`), and prepared-draft state; it never reuses RedNote cookies. Its browser starts lazily only when a `chineseinla_*` tool is called.
+
+```bash
+# Run both RedNote and ChineseInLA headlessly
+go run . -headless=true -chineseinla-headless=true
+
+# For first login or CAPTCHA, retain the same profile and temporarily show ChineseInLA's browser
+go run . -chineseinla-headless=false
+```
+
+Independent options include `-chineseinla-cdp-port`, `-chineseinla-profile-dir`, `-chineseinla-state-file`, `-chineseinla-preview-image`, and `-chineseinla-browser-bin`. Equivalent environment variables are `CHINESEINLA_CDP_PORT`, `CHINESEINLA_PROFILE_DIR`, `CHINESEINLA_STATE_PATH`, `CHINESEINLA_PREVIEW_PATH`, `CHINESEINLA_BROWSER_BIN`, and `CHINESEINLA_HEADLESS`. Use visible mode for initial login or manual verification; headless preparation returns a PNG of the filled form as MCP image content.
+
 **Configure a proxy (optional)**:
 
 If you need to go through a proxy, set the `XHS_PROXY` environment variable:
@@ -786,7 +800,7 @@ Usage steps:
 
 - Use MCP Inspector to test connection
 - Test Ping Server functionality to verify connection
-- Check if List Tools returns 13 tools
+- Check if List Tools returns 23 tools
 
 </details>
 
@@ -922,6 +936,19 @@ After successful connection, you can use the following MCP tools:
 - `favorite_feed` - Favorite / unfavorite a note (required: feed_id, xsec_token)
   - `unfavorite`: Whether to unfavorite (optional), true to unfavorite, default is favorite
 - `user_profile` - Get user profile information (required: user_id, xsec_token)
+
+ChineseInLA tools (served from the same MCP URL as the RedNote tools):
+
+- `chineseinla_open_login` - Open the ChineseInLA login page in its isolated browser profile (no parameters)
+- `chineseinla_check_login` - Check ChineseInLA login state (no parameters)
+- `chineseinla_list_forums` - Fetch the live forum catalog and valid `forum_id` values (no parameters)
+- `chineseinla_prepare_post` - After the first explicit confirmation, fill but do not submit a form (required: `forum_id`, `post_type`, `title`, `body`, `confirm_preparation=true`; media parameters are optional)
+  - `post_type`: `question` | `classified` | `other`
+  - Headless mode returns a form-preview image and random `draft_id`; inspect the preview before requesting publish confirmation
+  - Preparation can upload the listed images to ChineseInLA, so it also requires prior user confirmation
+- `chineseinla_publish_post` - After a separate second confirmation, publish the prepared draft (required: the exact `draft_id` from preparation and `confirm_publish=true`)
+
+Each ChineseInLA service instance keeps one prepared form at a time and serializes its operations. A stale or mismatched `draft_id` is rejected before the publish control is clicked. CAPTCHA or human verification stops automation and must be completed in the visible browser; the integration does not bypass it.
 
 ### 2.4. Usage Examples
 

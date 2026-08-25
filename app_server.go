@@ -5,17 +5,32 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/internal/chineseinla"
 )
+
+// ChineseInLAService is the subset of the ChineseInLA automation exposed by MCP.
+// Keeping it as an interface makes the confirmation and draft-safety behavior
+// testable without starting a browser.
+type ChineseInLAService interface {
+	Login(context.Context) (chineseinla.LoginStatus, error)
+	CheckLogin(context.Context) (chineseinla.LoginStatus, error)
+	Forums(context.Context) ([]chineseinla.Forum, error)
+	Prepare(context.Context, chineseinla.PrepareRequest) (chineseinla.PrepareResult, error)
+	PublishPrepared(context.Context, string, bool) (chineseinla.PublishResult, error)
+}
 
 // AppServer 应用服务器结构体，封装所有服务和处理器
 type AppServer struct {
 	xiaohongshuService *XiaohongshuService
+	chineseInLAService ChineseInLAService
+	chineseInLAMu      sync.Mutex
 	mcpServer          *mcp.Server
 	router             *gin.Engine
 	httpServer         *http.Server
@@ -24,8 +39,15 @@ type AppServer struct {
 
 // NewAppServer 创建新的应用服务器实例
 func NewAppServer(xiaohongshuService *XiaohongshuService, authToken string) *AppServer {
+	return NewAppServerWithChineseInLA(xiaohongshuService, nil, authToken)
+}
+
+// NewAppServerWithChineseInLA creates one MCP server hosting both Xiaohongshu
+// and ChineseInLA tools. Each service keeps its own browser configuration.
+func NewAppServerWithChineseInLA(xiaohongshuService *XiaohongshuService, chineseInLAService ChineseInLAService, authToken string) *AppServer {
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
+		chineseInLAService: chineseInLAService,
 		authToken:          authToken,
 	}
 

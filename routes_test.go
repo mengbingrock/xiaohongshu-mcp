@@ -75,6 +75,50 @@ func TestNotificationToolsRegistered(t *testing.T) {
 	var result struct {
 		Result struct {
 			Tools []struct {
+				Name        string `json:"name"`
+				InputSchema struct {
+					Required []string `json:"required"`
+				} `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+
+	names := make(map[string]bool, len(result.Result.Tools))
+	required := make(map[string][]string, len(result.Result.Tools))
+	for _, tool := range result.Result.Tools {
+		names[tool.Name] = true
+		required[tool.Name] = tool.InputSchema.Required
+	}
+
+	for _, want := range []string{"get_unread_count", "list_notifications", "reply_notification", "like_notification"} {
+		assert.True(t, names[want], "工具 %s 应已注册", want)
+	}
+	assert.Contains(t, required["chineseinla_prepare_post"], "confirm_preparation")
+	assert.Contains(t, required["chineseinla_publish_post"], "draft_id")
+	assert.Contains(t, required["chineseinla_publish_post"], "confirm_publish")
+}
+
+// TestChineseInLAToolsRegistered fixes the contract that one MCP endpoint hosts
+// both the original Xiaohongshu tools and the namespaced ChineseInLA workflow.
+func TestChineseInLAToolsRegistered(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var result struct {
+		Result struct {
+			Tools []struct {
 				Name string `json:"name"`
 			} `json:"tools"`
 		} `json:"result"`
@@ -86,7 +130,14 @@ func TestNotificationToolsRegistered(t *testing.T) {
 		names[tool.Name] = true
 	}
 
-	for _, want := range []string{"get_unread_count", "list_notifications", "reply_notification", "like_notification"} {
+	for _, want := range []string{
+		"check_login_status",
+		"chineseinla_open_login",
+		"chineseinla_check_login",
+		"chineseinla_list_forums",
+		"chineseinla_prepare_post",
+		"chineseinla_publish_post",
+	} {
 		assert.True(t, names[want], "工具 %s 应已注册", want)
 	}
 }

@@ -8,12 +8,18 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
+	"github.com/xpzouying/xiaohongshu-mcp/internal/chineseinla"
 )
 
 // version 构建版本号，发布时通过 -ldflags "-X main.version=vX.Y.Z" 注入。
 var version = "dev"
 
 func main() {
+	chineseInLAConfig, err := chineseinla.DefaultConfig()
+	if err != nil {
+		logrus.Fatalf("invalid ChineseInLA configuration: %v", err)
+	}
+
 	var (
 		headless bool
 		port     string
@@ -22,6 +28,12 @@ func main() {
 	flag.BoolVar(&headless, "headless", true, "是否无头模式")
 	flag.StringVar(&port, "port", ":18060", "端口")
 	flag.StringVar(&token, "token", "", "鉴权 Token，留空则读取 AUTH_TOKEN")
+	flag.BoolVar(&chineseInLAConfig.Headless, "chineseinla-headless", chineseInLAConfig.Headless, "ChineseInLA 是否使用无头模式")
+	flag.IntVar(&chineseInLAConfig.CDPPort, "chineseinla-cdp-port", chineseInLAConfig.CDPPort, "ChineseInLA 专用 Chrome DevTools 端口")
+	flag.StringVar(&chineseInLAConfig.ProfileDir, "chineseinla-profile-dir", chineseInLAConfig.ProfileDir, "ChineseInLA 独立浏览器配置目录")
+	flag.StringVar(&chineseInLAConfig.StatePath, "chineseinla-state-file", chineseInLAConfig.StatePath, "ChineseInLA 待发布草稿状态文件")
+	flag.StringVar(&chineseInLAConfig.PreviewPath, "chineseinla-preview-image", chineseInLAConfig.PreviewPath, "ChineseInLA 无头预览图片路径")
+	flag.StringVar(&chineseInLAConfig.BrowserBin, "chineseinla-browser-bin", chineseInLAConfig.BrowserBin, "ChineseInLA 浏览器可执行文件")
 	flag.Parse()
 	if token == "" {
 		token = os.Getenv("AUTH_TOKEN")
@@ -45,9 +57,13 @@ func main() {
 
 	// 初始化服务
 	xiaohongshuService := NewXiaohongshuService()
+	if chineseInLAConfig.BrowserBin == "" {
+		chineseInLAConfig.BrowserBin = binPath
+	}
+	chineseInLAService := chineseinla.NewAutomation(chineseInLAConfig)
 
 	// 创建并启动应用服务器
-	appServer := NewAppServer(xiaohongshuService, token)
+	appServer := NewAppServerWithChineseInLA(xiaohongshuService, chineseInLAService, token)
 	if err := appServer.Start(port); err != nil {
 		logrus.Fatalf("failed to run server: %v", err)
 	}

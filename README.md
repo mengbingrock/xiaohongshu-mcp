@@ -485,6 +485,20 @@ go run .
 go run . -headless=false
 ```
 
+**同时启用 ChineseInLA（洛杉矶华人资讯网）**：
+
+同一个 `/mcp` 端点会同时注册小红书和 ChineseInLA 工具。ChineseInLA 使用独立的浏览器配置目录、登录状态、CDP 端口（默认 `9223`）和待发布草稿，不会复用小红书 cookies；只有调用 `chineseinla_*` 工具时才会启动其浏览器。
+
+```bash
+# 小红书和 ChineseInLA 都使用 headless 模式
+go run . -headless=true -chineseinla-headless=true
+
+# 首次登录或处理 CAPTCHA 时，保留相同配置目录并临时显示 ChineseInLA 浏览器
+go run . -chineseinla-headless=false
+```
+
+可用的独立参数包括 `-chineseinla-cdp-port`、`-chineseinla-profile-dir`、`-chineseinla-state-file`、`-chineseinla-preview-image` 和 `-chineseinla-browser-bin`。也可使用 `CHINESEINLA_CDP_PORT`、`CHINESEINLA_PROFILE_DIR`、`CHINESEINLA_STATE_PATH`、`CHINESEINLA_PREVIEW_PATH`、`CHINESEINLA_BROWSER_BIN`、`CHINESEINLA_HEADLESS` 环境变量。可见模式用于首次登录/人工验证；headless 准备阶段会把已填写表单的 PNG 预览作为 MCP 图片返回。
+
 **配置代理（可选）**：
 
 如果需要通过代理访问，可以设置 `XHS_PROXY` 环境变量：
@@ -784,7 +798,7 @@ npx @modelcontextprotocol/inspector
 
 - 使用 MCP Inspector 测试连接
 - 测试 Ping Server 功能验证连接
-- 检查 List Tools 是否返回 13 个工具
+- 检查 List Tools 是否返回 23 个工具
 
 </details>
 
@@ -920,6 +934,19 @@ npx mcporter list xiaohongshu-mcp
 - `favorite_feed` - 收藏/取消收藏（必需：feed_id, xsec_token）
   - `unfavorite`: 是否取消收藏（可选），true 为取消收藏，默认为收藏
 - `user_profile` - 获取用户个人主页信息（必需：user_id, xsec_token）
+
+ChineseInLA 工具（与以上小红书工具共用同一个 MCP 地址）：
+
+- `chineseinla_open_login` - 在独立浏览器配置中打开 ChineseInLA 登录页（无参数）
+- `chineseinla_check_login` - 检查 ChineseInLA 登录状态（无参数）
+- `chineseinla_list_forums` - 获取实时版块目录和有效 `forum_id`（无参数）
+- `chineseinla_prepare_post` - 经第一次明确确认后填写表单但不发布（必需：`forum_id`, `post_type`, `title`, `body`, `confirm_preparation=true`；媒体等参数可选）
+  - `post_type`: `question`（问题征解）| `classified`（分类信息）| `other`（其他类型）
+  - headless 模式返回表单预览图片和随机 `draft_id`；必须检查预览后再请求发布确认
+  - 准备阶段可能把列出的图片上传到 ChineseInLA，因此也必须先取得用户确认
+- `chineseinla_publish_post` - 经第二次明确确认后发布当前草稿（必需：上一步的精确 `draft_id`, `confirm_publish=true`）
+
+ChineseInLA 每个服务实例同时只保留一个待发布表单，操作会串行执行；过期或不匹配的 `draft_id` 会在点击发布前被拒绝。遇到 CAPTCHA/人工验证会停止并要求用户在可见浏览器中完成，不会绕过验证。
 
 ### 2.4. 使用示例
 

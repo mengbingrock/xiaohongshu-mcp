@@ -1,0 +1,235 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/xpzouying/xiaohongshu-mcp/internal/chineseinla"
+)
+
+type ChineseInLAPreparePostArgs struct {
+	ForumID            int      `json:"forum_id" jsonschema:"ChineseInLA forum ID returned by chineseinla_list_forums"`
+	PostType           string   `json:"post_type" jsonschema:"Post classification: question, classified, or other"`
+	Title              string   `json:"title" jsonschema:"Post title; ChineseInLA recommends 8–15 Chinese characters and disallows phone numbers or email addresses in titles"`
+	Body               string   `json:"body" jsonschema:"Post body"`
+	Tags               []string `json:"tags,omitempty" jsonschema:"Optional tags to append in the editor"`
+	Images             []string `json:"images,omitempty" jsonschema:"Optional local image paths"`
+	ImageURLs          []string `json:"image_urls,omitempty" jsonschema:"Optional public HTTP/HTTPS image URLs to download and upload"`
+	SourceURL          string   `json:"source_url,omitempty" jsonschema:"Optional source URL appended as attribution"`
+	VideoURLs          []string `json:"video_urls,omitempty" jsonschema:"Optional video URLs preserved as links in the body"`
+	ConfirmPreparation bool     `json:"confirm_preparation" jsonschema:"Must be true after the user explicitly confirms the exact forum, post type, title, body, tags, and media may be filled into ChineseInLA"`
+}
+
+type ChineseInLAPublishPostArgs struct {
+	DraftID        string `json:"draft_id" jsonschema:"Exact draft_id returned by chineseinla_prepare_post"`
+	ConfirmPublish bool   `json:"confirm_publish" jsonschema:"Must be true only after the user reviews the visible form or returned headless preview and explicitly confirms publication"`
+}
+
+func registerChineseInLATools(server *mcp.Server, appServer *AppServer) {
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_open_login",
+			Description: "Open ChineseInLA's login page in its isolated browser profile. In headless mode, restart once with -chineseinla-headless=false to complete an interactive login.",
+			Annotations: &mcp.ToolAnnotations{Title: "Open ChineseInLA Login"},
+		},
+		withPanicRecovery("chineseinla_open_login", func(ctx context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLAOpenLogin(ctx)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_check_login",
+			Description: "Check whether the isolated ChineseInLA browser profile is logged in.",
+			Annotations: &mcp.ToolAnnotations{Title: "Check ChineseInLA Login", ReadOnlyHint: true},
+		},
+		withPanicRecovery("chineseinla_check_login", func(ctx context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLACheckLogin(ctx)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_list_forums",
+			Description: "Read the live ChineseInLA forum catalog and return valid forum IDs. Call this before preparing a post instead of guessing a forum ID.",
+			Annotations: &mcp.ToolAnnotations{Title: "List ChineseInLA Forums", ReadOnlyHint: true},
+		},
+		withPanicRecovery("chineseinla_list_forums", func(ctx context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLAListForums(ctx)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name: "chineseinla_prepare_post",
+			Description: "After the user's first explicit confirmation, fill a ChineseInLA post form without publishing it. " +
+				"Returns a draft_id and, in headless mode, a screenshot that must be reviewed before a separate publish call.",
+			Annotations: &mcp.ToolAnnotations{Title: "Prepare ChineseInLA Post", DestructiveHint: boolPtr(true)},
+		},
+		withPanicRecovery("chineseinla_prepare_post", func(ctx context.Context, _ *mcp.CallToolRequest, args ChineseInLAPreparePostArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLAPreparePost(ctx, args)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name: "chineseinla_publish_post",
+			Description: "Publish exactly the prepared ChineseInLA draft. Call only after the user reviews the prepared form or screenshot and gives a second explicit confirmation; " +
+				"confirm_publish must be true and draft_id must match chineseinla_prepare_post.",
+			Annotations: &mcp.ToolAnnotations{Title: "Publish ChineseInLA Post", DestructiveHint: boolPtr(true)},
+		},
+		withPanicRecovery("chineseinla_publish_post", func(ctx context.Context, _ *mcp.CallToolRequest, args ChineseInLAPublishPostArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLAPublishPost(ctx, args)), nil, nil
+		}),
+	)
+}
+
+func (s *AppServer) handleChineseInLAOpenLogin(ctx context.Context) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+
+	result, err := s.chineseInLAService.Login(ctx)
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLAJSONResult(result)
+}
+
+func (s *AppServer) handleChineseInLACheckLogin(ctx context.Context) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+
+	result, err := s.chineseInLAService.CheckLogin(ctx)
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLAJSONResult(result)
+}
+
+func (s *AppServer) handleChineseInLAListForums(ctx context.Context) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+
+	forums, err := s.chineseInLAService.Forums(ctx)
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLAJSONResult(struct {
+		Status string              `json:"status"`
+		Count  int                 `json:"count"`
+		Forums []chineseinla.Forum `json:"forums"`
+	}{Status: "ok", Count: len(forums), Forums: forums})
+}
+
+func (s *AppServer) handleChineseInLAPreparePost(ctx context.Context, args ChineseInLAPreparePostArgs) *MCPToolResult {
+	if !args.ConfirmPreparation {
+		return chineseInLARefusal("Refusing to fill the ChineseInLA form without the user's first explicit confirmation (confirm_preparation=true).")
+	}
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	postType, err := chineseinla.ParsePostType(args.PostType)
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+	result, err := s.chineseInLAService.Prepare(ctx, chineseinla.PrepareRequest{
+		ForumID:   args.ForumID,
+		PostType:  postType,
+		Title:     args.Title,
+		Body:      args.Body,
+		Tags:      args.Tags,
+		Images:    args.Images,
+		ImageURLs: args.ImageURLs,
+		SourceURL: args.SourceURL,
+		VideoURLs: args.VideoURLs,
+	})
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+
+	toolResult := chineseInLAJSONResult(result)
+	if result.PreviewImage == "" {
+		return toolResult
+	}
+	preview, err := os.ReadFile(result.PreviewImage)
+	if err != nil {
+		return chineseInLAErrorResult(fmt.Errorf("read the required headless preview %q: %w; do not publish until the prepared form can be reviewed", result.PreviewImage, err))
+	}
+	toolResult.Content = append(toolResult.Content, MCPContent{
+		Type:     "image",
+		MimeType: "image/png",
+		Data:     base64.StdEncoding.EncodeToString(preview),
+	})
+	return toolResult
+}
+
+func (s *AppServer) handleChineseInLAPublishPost(ctx context.Context, args ChineseInLAPublishPostArgs) *MCPToolResult {
+	if !args.ConfirmPublish {
+		return chineseInLARefusal("Refusing to publish without the user's second explicit confirmation after reviewing the prepared form or screenshot (confirm_publish=true).")
+	}
+	if strings.TrimSpace(args.DraftID) == "" {
+		return chineseInLARefusal("Refusing to publish without the draft_id returned by chineseinla_prepare_post.")
+	}
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+	result, err := s.chineseInLAService.PublishPrepared(ctx, strings.TrimSpace(args.DraftID), true)
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLAJSONResult(result)
+}
+
+func (s *AppServer) chineseInLAUnavailable() *MCPToolResult {
+	if s.chineseInLAService != nil {
+		return nil
+	}
+	return chineseInLARefusal("ChineseInLA support is not configured in this server process. Start the main MCP server, which configures both services, or use NewAppServerWithChineseInLA when embedding it.")
+}
+
+func chineseInLAJSONResult(value any) *MCPToolResult {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return chineseInLAErrorResult(fmt.Errorf("encode ChineseInLA result: %w", err))
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
+}
+
+func chineseInLAErrorResult(err error) *MCPToolResult {
+	action := ""
+	switch {
+	case errors.Is(err, chineseinla.ErrNotLoggedIn):
+		action = " Open ChineseInLA login, complete sign-in in the isolated browser profile, then retry."
+	case errors.Is(err, chineseinla.ErrCaptcha):
+		action = " Complete the CAPTCHA or human verification manually; this integration will not bypass it."
+	}
+	return chineseInLARefusal("ChineseInLA operation failed: " + err.Error() + action)
+}
+
+func chineseInLARefusal(message string) *MCPToolResult {
+	return &MCPToolResult{
+		IsError: true,
+		Content: []MCPContent{{Type: "text", Text: message}},
+	}
+}
