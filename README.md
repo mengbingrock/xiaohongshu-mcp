@@ -487,7 +487,7 @@ go run . -headless=false
 
 **同时启用 ChineseInLA（洛杉矶华人资讯网）**：
 
-同一个 `/mcp` 端点会同时注册小红书和 ChineseInLA 工具。ChineseInLA 使用独立的浏览器配置目录、登录状态、CDP 端口（默认 `9223`）和待发布草稿，不会复用小红书 cookies；只有调用 `chineseinla_*` 工具时才会启动其浏览器。
+同一个 `/mcp` 端点会同时注册小红书和 ChineseInLA 工具。ChineseInLA 使用独立的 cookies JSON、浏览器配置目录、登录状态、CDP 端口（默认 `9223`）和待发布草稿，不会复用或覆盖小红书 cookies；只有调用 `chineseinla_*` 工具时才会启动其浏览器。
 
 ```bash
 # 小红书和 ChineseInLA 都使用 headless 模式
@@ -497,7 +497,7 @@ go run . -headless=true -chineseinla-headless=true
 go run . -chineseinla-headless=false
 ```
 
-可用的独立参数包括 `-chineseinla-cdp-port`、`-chineseinla-profile-dir`、`-chineseinla-state-file`、`-chineseinla-preview-image` 和 `-chineseinla-browser-bin`。也可使用 `CHINESEINLA_CDP_PORT`、`CHINESEINLA_PROFILE_DIR`、`CHINESEINLA_STATE_PATH`、`CHINESEINLA_PREVIEW_PATH`、`CHINESEINLA_BROWSER_BIN`、`CHINESEINLA_HEADLESS` 环境变量。Headless 首次登录会保留登录页 5 分钟，返回随机 `session_id` 和已隐藏输入值的截图；密码可提交到同一页面，成功后的会话保存在 ChineseInLA 独立 profile 中。遇到 CAPTCHA/人工验证仍会停止并报告，不会绕过。Headless 准备阶段会把已填写表单的 PNG 预览作为 MCP 图片返回。
+可用的独立参数包括 `-chineseinla-cdp-port`、`-chineseinla-profile-dir`、`-chineseinla-cookies-file`、`-chineseinla-state-file`、`-chineseinla-preview-image` 和 `-chineseinla-browser-bin`。也可使用 `CHINESEINLA_CDP_PORT`、`CHINESEINLA_PROFILE_DIR`、`CHINESEINLA_COOKIES_PATH`、`CHINESEINLA_STATE_PATH`、`CHINESEINLA_PREVIEW_PATH`、`CHINESEINLA_BROWSER_BIN`、`CHINESEINLA_HEADLESS` 环境变量。Headless 首次登录会保留登录页 5 分钟，返回随机 `session_id` 和已隐藏输入值的截图；密码可提交到同一页面，成功后的 ChineseInLA 域 cookies 会以权限 `0600` 写入独立 JSON 文件。服务启动后会先恢复该文件，因此即使换成空 profile 也可恢复仍然有效的登录；原 profile 继续作为 CAPTCHA、本地存储和浏览器连续性的兼容兜底。主程序会拒绝把 ChineseInLA 和小红书配置到同一个 cookies 文件。遇到 CAPTCHA/人工验证仍会停止并报告，不会绕过。Headless 准备阶段会把已填写表单的 PNG 预览作为 MCP 图片返回。
 
 远程部署时应配置 `AUTH_TOKEN`，并只通过 HTTPS 或 SSH 隧道调用以下受保护接口；密码请求不会写入日志或响应：
 

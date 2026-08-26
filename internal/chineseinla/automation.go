@@ -35,6 +35,8 @@ type Automation struct {
 	Downloader *ImageDownloader
 	State      StateStore
 
+	cookiePersistence cookiePersistenceState
+
 	// loginSessions keeps the one short-lived page used by the headless login
 	// workflow. The zero value is ready to use, which also keeps Automation
 	// safe when tests construct it without NewAutomation.
@@ -117,7 +119,12 @@ func (a *Automation) CheckLogin(ctx context.Context) (LoginStatus, error) {
 	if err != nil {
 		return LoginStatus{}, err
 	}
-	message := "ChineseInLA login is active in the isolated browser profile."
+	if loggedIn {
+		if err := a.persistCookies(browser); err != nil {
+			return LoginStatus{}, err
+		}
+	}
+	message := "ChineseInLA login is active and synchronized to its dedicated cookie store."
 	if !loggedIn {
 		message = "Not logged in. Run login and complete sign-in in the dedicated browser window."
 		if a.Config.Headless {
@@ -132,7 +139,14 @@ func (a *Automation) Forums(ctx context.Context) ([]Forum, error) {
 	if err != nil {
 		return nil, err
 	}
-	return a.forumsWithBrowser(browser)
+	forums, err := a.forumsWithBrowser(browser)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.persistCookies(browser); err != nil {
+		return nil, err
+	}
+	return forums, nil
 }
 
 func (a *Automation) forumsWithBrowser(browser *rod.Browser) ([]Forum, error) {
@@ -234,6 +248,9 @@ func (a *Automation) Prepare(ctx context.Context, request PrepareRequest) (Prepa
 		CreatedAt:    time.Now().UTC(),
 	}
 	if err := a.State.Save(state); err != nil {
+		return PrepareResult{}, err
+	}
+	if err := a.persistCookies(browser); err != nil {
 		return PrepareResult{}, err
 	}
 
@@ -339,6 +356,9 @@ func (a *Automation) publish(ctx context.Context, expectedDraftID string, confir
 	for time.Now().Before(deadline) {
 		info, infoErr := page.Info()
 		if infoErr == nil && info != nil && isChineseInLAURL(info.URL, "/f/page_viewtopic") {
+			if err := a.persistCookies(browser); err != nil {
+				return PublishResult{}, err
+			}
 			return a.completePublish(state, info.URL, "ChineseInLA accepted the post and redirected to the topic page.")
 		}
 		if infoErr == nil && info != nil && snapshotErr == nil &&
@@ -346,6 +366,9 @@ func (a *Automation) publish(ctx context.Context, expectedDraftID string, confir
 			topicURL, checkErr := a.findNewPublishedTopic(browser, preparedTitle, existingTopicURLs)
 			publishedTopicCheckErr = checkErr
 			if checkErr == nil && topicURL != "" {
+				if err := a.persistCookies(browser); err != nil {
+					return PublishResult{}, err
+				}
 				return a.completePublish(state, topicURL, "ChineseInLA accepted the post and listed it under the account's published topics.")
 			}
 			nextPublishedTopicCheck = time.Now().Add(2 * time.Second)
@@ -480,6 +503,9 @@ func (a *Automation) connect(ctx context.Context) (*rod.Browser, error) {
 	if controlURL, err := runningBrowserControlURL(ctx, a.Config.CDPPort); err == nil {
 		browser, connectErr := connectRodBrowser(ctx, controlURL)
 		if connectErr == nil {
+			if restoreErr := a.restoreCookiesOnce(browser, controlURL); restoreErr != nil {
+				return nil, restoreErr
+			}
 			return browser, nil
 		}
 	}
@@ -514,6 +540,9 @@ func (a *Automation) connect(ctx context.Context) (*rod.Browser, error) {
 	browser, err := connectRodBrowser(ctx, controlURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect to the ChineseInLA browser: %w", err)
+	}
+	if err := a.restoreCookiesOnce(browser, controlURL); err != nil {
+		return nil, err
 	}
 	return browser, nil
 }

@@ -46,6 +46,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	global.SetOutput(stderr)
 	global.IntVar(&config.CDPPort, "cdp-port", config.CDPPort, "dedicated Chrome DevTools port")
 	global.StringVar(&config.ProfileDir, "profile-dir", config.ProfileDir, "isolated persistent browser profile")
+	global.StringVar(&config.CookiePath, "cookies-file", config.CookiePath, "ChineseInLA cookies JSON file")
 	global.StringVar(&config.StatePath, "state-file", config.StatePath, "prepared-post state file")
 	global.StringVar(&config.PreviewPath, "preview-image", config.PreviewPath, "headless prepared-form preview PNG")
 	global.StringVar(&config.BrowserBin, "browser-bin", config.BrowserBin, "browser executable (defaults to the repository's bundled browser)")
