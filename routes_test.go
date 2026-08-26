@@ -91,9 +91,19 @@ func TestNotificationToolsRegistered(t *testing.T) {
 		required[tool.Name] = tool.InputSchema.Required
 	}
 
-	for _, want := range []string{"get_unread_count", "list_notifications", "reply_notification", "like_notification"} {
+	for _, want := range []string{
+		"get_unread_count",
+		"list_notifications",
+		"reply_notification",
+		"like_notification",
+		"get_login_session_status",
+		"submit_login_code",
+	} {
 		assert.True(t, names[want], "工具 %s 应已注册", want)
 	}
+	assert.Contains(t, required["get_login_session_status"], "session_id")
+	assert.Contains(t, required["submit_login_code"], "session_id")
+	assert.Contains(t, required["submit_login_code"], "code")
 	assert.Contains(t, required["chineseinla_prepare_post"], "confirm_preparation")
 	assert.Contains(t, required["chineseinla_publish_post"], "draft_id")
 	assert.Contains(t, required["chineseinla_publish_post"], "confirm_publish")
@@ -161,6 +171,22 @@ func TestNotificationRoutesRegistered(t *testing.T) {
 		"POST /api/v1/notifications/list",
 		"POST /api/v1/notifications/reply",
 		"POST /api/v1/notifications/like",
+	} {
+		assert.True(t, registered[want], "路由 %s 应已注册", want)
+	}
+}
+
+func TestLoginOTPRoutesRegistered(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+
+	registered := make(map[string]bool)
+	for _, r := range router.Routes() {
+		registered[r.Method+" "+r.Path] = true
+	}
+
+	for _, want := range []string{
+		"GET /api/v1/login/sessions/:session_id",
+		"POST /api/v1/login/code",
 	} {
 		assert.True(t, registered[want], "路由 %s 应已注册", want)
 	}

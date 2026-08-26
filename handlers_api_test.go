@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -38,6 +39,31 @@ func TestRespondErrorLogLevel(t *testing.T) {
 
 			require.Len(t, hook.Entries, 1)
 			assert.Equal(t, tt.wantLevel, hook.LastEntry().Level)
+		})
+	}
+}
+
+func TestSubmitLoginCodeHandlerRejectsInvalidOrUnknownSession(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{name: "invalid code", body: `{"session_id":"missing","code":"123"}`, wantStatus: http.StatusBadRequest},
+		{name: "unknown session", body: `{"session_id":"missing","code":"012345"}`, wantStatus: http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/login/code", strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+			assert.Equal(t, tt.wantStatus, recorder.Code)
+			assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+			assert.NotContains(t, recorder.Body.String(), "012345", "OTP must never be echoed")
 		})
 	}
 }

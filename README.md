@@ -798,7 +798,7 @@ npx @modelcontextprotocol/inspector
 
 - 使用 MCP Inspector 测试连接
 - 测试 Ping Server 功能验证连接
-- 检查 List Tools 是否返回 23 个工具
+- 检查 List Tools 是否返回 25 个工具
 
 </details>
 
@@ -898,7 +898,10 @@ npx mcporter list xiaohongshu-mcp
 连接成功后，可使用以下 MCP 工具：
 
 - `check_login_status` - 检查小红书登录状态（无参数）
-- `get_login_qrcode` - 获取登录二维码，返回 Base64 图片和超时时间（无参数）
+- `get_login_qrcode` - 获取登录二维码，返回 Base64 图片、超时时间和随机 `session_id`（无参数）
+- `get_login_session_status` - 查询二维码会话是否已扫码、需要 OTP/CAPTCHA 或已经登录（必需：`session_id`）
+- `submit_login_code` - 扫码后若小红书要求验证码，将 6 位验证码填入原 headless 页面（必需：`session_id`, `code`）
+  - 验证码不会写入服务端日志或响应；共享云环境优先通过启用 HTTPS 和 `AUTH_TOKEN` 的 `/api/v1/login/code` 直接提交，避免进入模型/客户端历史
 - `delete_cookies` - 删除 cookies 文件，重置登录状态，删除后需要重新登录（无参数）
 - `publish_content` - 发布图文内容到小红书（必需：title, content, images）
   - `images`: 图片路径列表（至少1张），支持 HTTP 链接或本地绝对路径，推荐使用本地路径

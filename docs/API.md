@@ -52,6 +52,8 @@ Token 缺失或无效时，接口返回 HTTP `401 Unauthorized`。命令行参�
 | GET | `/health` | 健康检查 |
 | GET | `/api/v1/login/status` | 检查登录状态 |
 | GET | `/api/v1/login/qrcode` | 获取登录二维码 |
+| GET | `/api/v1/login/sessions/:session_id` | 查询二维码登录会话状态 |
+| POST | `/api/v1/login/code` | 向扫码所用的 headless 页面提交验证码 |
 | DELETE | `/api/v1/login/cookies` | 删除 Cookies（重置登录） |
 | POST | `/api/v1/publish` | 发布图文内容 |
 | POST | `/api/v1/publish_video` | 发布视频内容 |
@@ -131,20 +133,65 @@ GET /api/v1/login/qrcode
 {
   "success": true,
   "data": {
-    "timeout": "300",
+    "timeout": "4m0s",
     "is_logged_in": false,
-    "img": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+    "img": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
+    "session_id": "opaque-random-session-id",
+    "state": "waiting_for_scan",
+    "expires_at": "2026-08-25T21:13:47-07:00"
   },
   "message": "获取登录二维码成功"
 }
 ```
 
 **响应字段说明:**
-- `timeout`: 二维码过期时间（秒）
+- `timeout`: 二维码登录会话剩余时间（Go duration）
 - `is_logged_in`: 当前是否已登录
 - `img`: Base64 编码的二维码图片
+- `session_id`: 本次扫码浏览器的随机会话 ID；查询状态和提交验证码时必须原样传回
+- `state`: 当前会话状态
+- `expires_at`: 会话过期时间
 
-#### 2.3 删除 Cookies（重置登录状态）
+#### 2.3 查询二维码登录会话
+
+扫码后可轮询该接口。`otp_required` 表示小红书已在扫码所用的页面要求输入验证码；`captcha_required` 必须由用户人工完成，不能使用验证码接口绕过。
+
+**请求**
+```
+GET /api/v1/login/sessions/opaque-random-session-id
+```
+
+**响应**
+```json
+{
+  "success": true,
+  "data": {
+    "session_id": "opaque-random-session-id",
+    "state": "otp_required",
+    "expires_at": "2026-08-25T21:13:47-07:00",
+    "attempts": 0
+  }
+}
+```
+
+#### 2.4 提交扫码后的验证码
+
+仅在会话状态为 `otp_required`（或已经检测到二维码扫描完成）时调用。验证码只会填入生成二维码的同一个 headless 页面，不会启动新浏览器。最多允许三次成功点击提交。
+
+**请求**
+```http
+POST /api/v1/login/code
+Content-Type: application/json
+
+{
+  "session_id": "opaque-random-session-id",
+  "code": "012345"
+}
+```
+
+`code` 必须作为字符串发送，以保留前导零。服务端不会记录或回显验证码。云端必须同时启用 `AUTH_TOKEN` 和 HTTPS；共享环境应避免让验证码经过模型或 MCP 客户端历史，优先直接调用本接口。
+
+#### 2.5 删除 Cookies（重置登录状态）
 
 删除本地存储的 cookies 文件，重置登录状态。
 

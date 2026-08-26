@@ -15,6 +15,19 @@ func boolPtr(b bool) *bool { return &b }
 
 // MCP 工具参数结构体定义
 
+// LoginSessionArgs identifies the browser session returned by get_login_qrcode.
+type LoginSessionArgs struct {
+	SessionID string `json:"session_id" jsonschema:"get_login_qrcode 返回的登录会话 ID"`
+}
+
+// SubmitLoginCodeArgs carries the short-lived OTP. The server never logs or
+// echoes Code, but remote MCP clients may retain tool arguments in their own
+// history; a direct authenticated HTTPS call is preferable in shared clouds.
+type SubmitLoginCodeArgs struct {
+	SessionID string `json:"session_id" jsonschema:"get_login_qrcode 返回的登录会话 ID"`
+	Code      string `json:"code" jsonschema:"扫码后小红书要求输入的 6 位数字验证码；使用字符串以保留前导零"`
+}
+
 // PublishContentArgs 发布内容的参数
 type PublishContentArgs struct {
 	Title      string   `json:"title" jsonschema:"内容标题（小红书限制：最多20个中文字或英文单词）"`
@@ -199,12 +212,45 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			Name:        "get_login_qrcode",
 			Description: "获取登录二维码（返回 Base64 图片和超时时间）",
 			Annotations: &mcp.ToolAnnotations{
-				Title:        "Get Login QR Code",
-				ReadOnlyHint: true,
+				Title:           "Get Login QR Code",
+				DestructiveHint: boolPtr(false),
 			},
 		},
 		withPanicRecovery("get_login_qrcode", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleGetLoginQrcode(ctx)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 查询二维码登录会话是否已扫码、需要 OTP/CAPTCHA 或已经完成。
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "get_login_session_status",
+			Description: "查询 get_login_qrcode 创建的小红书登录会话状态",
+			Annotations: &mcp.ToolAnnotations{
+				Title:        "Get Login Session Status",
+				ReadOnlyHint: true,
+			},
+		},
+		withPanicRecovery("get_login_session_status", func(ctx context.Context, req *mcp.CallToolRequest, args LoginSessionArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleGetLoginSessionStatus(ctx, args.SessionID)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 在扫码后的同一个 headless 页面填写 OTP。验证码不会写入服务端日志。
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "submit_login_code",
+			Description: "仅当扫码后小红书明确要求输入验证码时调用；把 6 位验证码提交到原 headless 登录页面。验证码属于敏感信息，共享云环境优先使用受保护的 HTTPS API。",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Submit Login Code",
+				DestructiveHint: boolPtr(false),
+				OpenWorldHint:   boolPtr(true),
+			},
+		},
+		withPanicRecovery("submit_login_code", func(ctx context.Context, req *mcp.CallToolRequest, args SubmitLoginCodeArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleSubmitLoginCode(ctx, args.SessionID, args.Code)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -550,7 +596,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 
 	registerChineseInLATools(server, appServer)
 
-	logrus.Infof("Registered %d MCP tools", 23)
+	logrus.Infof("Registered %d MCP tools", 25)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

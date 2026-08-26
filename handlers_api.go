@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -58,6 +59,7 @@ func (s *AppServer) checkLoginStatusHandler(c *gin.Context) {
 // getLoginQrcodeHandler 处理 [GET /api/v1/login/qrcode] 请求。
 // 用于生成并返回登录二维码（Base64 图片 + 超时时间），供前端展示给用户扫码登录。
 func (s *AppServer) getLoginQrcodeHandler(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	result, err := s.xiaohongshuService.GetLoginQrcode(c.Request.Context())
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "STATUS_CHECK_FAILED",
@@ -66,6 +68,54 @@ func (s *AppServer) getLoginQrcodeHandler(c *gin.Context) {
 	}
 
 	respondSuccess(c, result, "获取登录二维码成功")
+}
+
+// getLoginSessionStatusHandler reports whether the retained headless page is
+// waiting for a scan, requesting OTP/CAPTCHA, or authenticated.
+func (s *AppServer) getLoginSessionStatusHandler(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	status, err := s.xiaohongshuService.GetLoginSessionStatus(c.Request.Context(), c.Param("session_id"))
+	if err != nil {
+		respondError(c, http.StatusNotFound, "LOGIN_SESSION_NOT_FOUND", "登录会话不存在", nil)
+		return
+	}
+	respondSuccess(c, status, "获取登录会话状态成功")
+}
+
+// submitLoginCodeHandler submits an OTP to the page retained after QR scan.
+// Do not log or echo the request body: it contains a short-lived credential.
+func (s *AppServer) submitLoginCodeHandler(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	var req SubmitLoginCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_LOGIN_CODE_REQUEST", "请求参数错误", nil)
+		return
+	}
+
+	status, err := s.xiaohongshuService.SubmitLoginCode(c.Request.Context(), req)
+	if err == nil {
+		respondSuccess(c, status, "验证码已提交到登录页面")
+		return
+	}
+
+	switch {
+	case errors.Is(err, xiaohongshu.ErrInvalidVerificationCode):
+		respondError(c, http.StatusBadRequest, "INVALID_LOGIN_CODE", "验证码必须是 6 位数字", nil)
+	case errors.Is(err, ErrLoginSessionNotFound):
+		respondError(c, http.StatusNotFound, "LOGIN_SESSION_NOT_FOUND", "登录会话不存在", nil)
+	case errors.Is(err, ErrLoginCodeAttemptsExceeded):
+		respondError(c, http.StatusTooManyRequests, "LOGIN_CODE_ATTEMPTS_EXCEEDED", "验证码尝试次数已达上限", nil)
+	case errors.Is(err, ErrLoginCodeSubmissionPending):
+		respondError(c, http.StatusConflict, "LOGIN_CODE_SUBMISSION_PENDING", "已有验证码正在提交", nil)
+	case errors.Is(err, ErrLoginSessionClosed):
+		respondError(c, http.StatusConflict, "LOGIN_SESSION_CLOSED", "登录会话已结束，请重新获取二维码", nil)
+	case errors.Is(err, xiaohongshu.ErrVerificationCodeInputNotFound),
+		errors.Is(err, xiaohongshu.ErrVerificationCodeSubmitNotFound),
+		errors.Is(err, ErrLoginCodeNotRequired):
+		respondError(c, http.StatusConflict, "LOGIN_CODE_NOT_REQUIRED", "当前登录页面未显示可提交的验证码表单", nil)
+	default:
+		respondError(c, http.StatusInternalServerError, "LOGIN_CODE_SUBMIT_FAILED", "提交验证码失败", nil)
+	}
 }
 
 // deleteCookiesHandler 删除 cookies，重置登录状态
