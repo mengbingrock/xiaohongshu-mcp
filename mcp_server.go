@@ -596,7 +596,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 
 	registerChineseInLATools(server, appServer)
 
-	logrus.Infof("Registered %d MCP tools", 25)
+	logrus.Infof("Registered %d MCP tools", 27)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

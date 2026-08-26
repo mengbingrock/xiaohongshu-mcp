@@ -31,15 +31,47 @@ type ChineseInLAPublishPostArgs struct {
 	ConfirmPublish bool   `json:"confirm_publish" jsonschema:"Must be true only after the user reviews the visible form or returned headless preview and explicitly confirms publication"`
 }
 
+type ChineseInLALoginSessionArgs struct {
+	SessionID string `json:"session_id" jsonschema:"Opaque session_id returned by chineseinla_open_login"`
+}
+
+type ChineseInLASubmitLoginPasswordArgs struct {
+	SessionID string `json:"session_id" jsonschema:"Opaque session_id returned by chineseinla_open_login"`
+	Username  string `json:"username" jsonschema:"ChineseInLA username, email address, or phone number"`
+	Password  string `json:"password" jsonschema:"ChineseInLA account password; never logged or echoed"`
+}
+
 func registerChineseInLATools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "chineseinla_open_login",
-			Description: "Open ChineseInLA's login page in its isolated browser profile. In headless mode, restart once with -chineseinla-headless=false to complete an interactive login.",
+			Description: "Start a five-minute ChineseInLA login session in its isolated browser profile. In headless mode this returns a redacted login-page screenshot and a session_id for password submission.",
 			Annotations: &mcp.ToolAnnotations{Title: "Open ChineseInLA Login"},
 		},
 		withPanicRecovery("chineseinla_open_login", func(ctx context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
 			return convertToMCPResult(appServer.handleChineseInLAOpenLogin(ctx)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_get_login_session_status",
+			Description: "Query a retained ChineseInLA login session and return its latest state plus a redacted screenshot when the page is still open.",
+			Annotations: &mcp.ToolAnnotations{Title: "Get ChineseInLA Login Session", ReadOnlyHint: true},
+		},
+		withPanicRecovery("chineseinla_get_login_session_status", func(ctx context.Context, _ *mcp.CallToolRequest, args ChineseInLALoginSessionArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLAGetLoginSession(ctx, args)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_submit_login_password",
+			Description: "Submit ChineseInLA credentials to the retained headless login page. The password is not logged or echoed. On a shared or remote server, prefer the AUTH_TOKEN-protected HTTPS endpoint so the password does not pass through a model conversation. CAPTCHA is reported and never bypassed.",
+			Annotations: &mcp.ToolAnnotations{Title: "Submit ChineseInLA Password", OpenWorldHint: boolPtr(true)},
+		},
+		withPanicRecovery("chineseinla_submit_login_password", func(ctx context.Context, _ *mcp.CallToolRequest, args ChineseInLASubmitLoginPasswordArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLASubmitLoginPassword(ctx, args)), nil, nil
 		}),
 	)
 
@@ -97,11 +129,50 @@ func (s *AppServer) handleChineseInLAOpenLogin(ctx context.Context) *MCPToolResu
 	s.chineseInLAMu.Lock()
 	defer s.chineseInLAMu.Unlock()
 
-	result, err := s.chineseInLAService.Login(ctx)
+	result, err := s.chineseInLAService.StartLogin(ctx)
 	if err != nil {
 		return chineseInLAErrorResult(err)
 	}
-	return chineseInLAJSONResult(result)
+	return chineseInLALoginSessionResult(result)
+}
+
+func (s *AppServer) handleChineseInLAGetLoginSession(ctx context.Context, args ChineseInLALoginSessionArgs) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	if strings.TrimSpace(args.SessionID) == "" {
+		return chineseInLARefusal("ChineseInLA session_id is required.")
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+
+	result, err := s.chineseInLAService.GetLoginSession(ctx, strings.TrimSpace(args.SessionID))
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLALoginSessionResult(result)
+}
+
+func (s *AppServer) handleChineseInLASubmitLoginPassword(ctx context.Context, args ChineseInLASubmitLoginPasswordArgs) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+
+	// Never log or echo args: password is a long-lived credential.
+	request := chineseinla.PasswordLoginRequest{
+		SessionID: args.SessionID,
+		Username:  args.Username,
+		Password:  args.Password,
+	}
+	result, err := s.chineseInLAService.SubmitPasswordLogin(ctx, request)
+	request.Password = ""
+	args.Password = ""
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLALoginSessionResult(result)
 }
 
 func (s *AppServer) handleChineseInLACheckLogin(ctx context.Context) *MCPToolResult {
@@ -216,6 +287,18 @@ func chineseInLAJSONResult(value any) *MCPToolResult {
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
 }
 
+func chineseInLALoginSessionResult(status chineseinla.LoginSessionStatus) *MCPToolResult {
+	result := chineseInLAJSONResult(status)
+	if status.Screenshot != nil && !status.LoggedIn && !result.IsError {
+		result.Content = append(result.Content, MCPContent{
+			Type:     "image",
+			MimeType: "image/png",
+			Data:     base64.StdEncoding.EncodeToString(status.Screenshot),
+		})
+	}
+	return result
+}
+
 func chineseInLAErrorResult(err error) *MCPToolResult {
 	action := ""
 	switch {
@@ -223,6 +306,10 @@ func chineseInLAErrorResult(err error) *MCPToolResult {
 		action = " Open ChineseInLA login, complete sign-in in the isolated browser profile, then retry."
 	case errors.Is(err, chineseinla.ErrCaptcha):
 		action = " Complete the CAPTCHA or human verification manually; this integration will not bypass it."
+	case errors.Is(err, chineseinla.ErrLoginSessionNotFound), errors.Is(err, chineseinla.ErrLoginSessionExpired):
+		action = " Start a new ChineseInLA login session and use its exact session_id."
+	case errors.Is(err, chineseinla.ErrLoginAttemptsExceeded):
+		action = " Start a new ChineseInLA login session before trying again."
 	}
 	return chineseInLARefusal("ChineseInLA operation failed: " + err.Error() + action)
 }

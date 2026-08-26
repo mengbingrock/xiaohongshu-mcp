@@ -19,6 +19,7 @@ import (
 
 type fakeChineseInLAService struct {
 	loginResult      chineseinla.LoginStatus
+	loginSession     chineseinla.LoginSessionStatus
 	checkLoginResult chineseinla.LoginStatus
 	forumsResult     []chineseinla.Forum
 	prepareResult    chineseinla.PrepareResult
@@ -29,10 +30,37 @@ type fakeChineseInLAService struct {
 	preparedRequest  chineseinla.PrepareRequest
 	publishedDraftID string
 	publishConfirmed bool
+	startLoginCalls  int
+	getLoginCalls    int
+	submitLoginCalls int
+	loginSessionID   string
+	passwordRequest  chineseinla.PasswordLoginRequest
+	closeLoginCalls  int
 }
 
 func (f *fakeChineseInLAService) Login(context.Context) (chineseinla.LoginStatus, error) {
 	return f.loginResult, f.err
+}
+
+func (f *fakeChineseInLAService) StartLogin(context.Context) (chineseinla.LoginSessionStatus, error) {
+	f.startLoginCalls++
+	return f.loginSession, f.err
+}
+
+func (f *fakeChineseInLAService) GetLoginSession(_ context.Context, sessionID string) (chineseinla.LoginSessionStatus, error) {
+	f.getLoginCalls++
+	f.loginSessionID = sessionID
+	return f.loginSession, f.err
+}
+
+func (f *fakeChineseInLAService) SubmitPasswordLogin(_ context.Context, request chineseinla.PasswordLoginRequest) (chineseinla.LoginSessionStatus, error) {
+	f.submitLoginCalls++
+	f.passwordRequest = request
+	return f.loginSession, f.err
+}
+
+func (f *fakeChineseInLAService) CloseLoginSession() {
+	f.closeLoginCalls++
 }
 
 func (f *fakeChineseInLAService) CheckLogin(context.Context) (chineseinla.LoginStatus, error) {
@@ -54,6 +82,49 @@ func (f *fakeChineseInLAService) PublishPrepared(_ context.Context, draftID stri
 	f.publishedDraftID = draftID
 	f.publishConfirmed = confirmed
 	return f.publishResult, f.err
+}
+
+func TestChineseInLAOpenLoginReturnsRetainedSessionAndScreenshot(t *testing.T) {
+	t.Parallel()
+	fake := &fakeChineseInLAService{loginSession: chineseinla.LoginSessionStatus{
+		SessionID:  "login-session-123",
+		State:      chineseinla.LoginSessionWaitingCredentials,
+		Screenshot: []byte("redacted-login-page"),
+	}}
+	server := &AppServer{chineseInLAService: fake}
+
+	result := server.handleChineseInLAOpenLogin(t.Context())
+
+	require.False(t, result.IsError)
+	require.Len(t, result.Content, 2)
+	assert.Contains(t, result.Content[0].Text, `"session_id": "login-session-123"`)
+	decoded, err := base64.StdEncoding.DecodeString(result.Content[1].Data)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("redacted-login-page"), decoded)
+	assert.Equal(t, 1, fake.startLoginCalls)
+}
+
+func TestChineseInLASubmitPasswordDoesNotEchoCredentials(t *testing.T) {
+	t.Parallel()
+	fake := &fakeChineseInLAService{loginSession: chineseinla.LoginSessionStatus{
+		SessionID: "login-session-123",
+		State:     chineseinla.LoginSessionAuthenticated,
+		LoggedIn:  true,
+	}}
+	server := &AppServer{chineseInLAService: fake}
+
+	result := server.handleChineseInLASubmitLoginPassword(t.Context(), ChineseInLASubmitLoginPasswordArgs{
+		SessionID: "login-session-123",
+		Username:  "private-account@example.com",
+		Password:  "never-echo-this-password",
+	})
+
+	require.False(t, result.IsError)
+	require.Len(t, result.Content, 1)
+	assert.NotContains(t, result.Content[0].Text, "private-account@example.com")
+	assert.NotContains(t, result.Content[0].Text, "never-echo-this-password")
+	assert.Equal(t, "never-echo-this-password", fake.passwordRequest.Password)
+	assert.Equal(t, 1, fake.submitLoginCalls)
 }
 
 func TestChineseInLAPrepareRequiresFirstConfirmation(t *testing.T) {
