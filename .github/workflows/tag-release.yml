@@ -50,13 +50,18 @@ jobs:
           exit 1
         fi
 
-        # Check if tag already exists
-        if git rev-parse "$VERSION" >/dev/null 2>&1; then
-          echo "Error: Tag $VERSION already exists"
-          exit 1
-        fi
-
         echo "Version $VERSION is valid"
+
+    # A manual release may publish a tag that was pushed before Actions were
+    # enabled on a fork. Build the exact tagged commit instead of whichever
+    # branch supplied the workflow_dispatch form.
+    - name: Check out existing release tag
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        if git rev-parse "$VERSION" >/dev/null 2>&1; then
+          git checkout --detach "$VERSION"
+        fi
 
     - name: Set up Go
       uses: actions/setup-go@v7
