@@ -19,7 +19,10 @@ import (
 // Keeping it as an interface makes the confirmation and draft-safety behavior
 // testable without starting a browser.
 type ChineseInLAService interface {
-	Login(context.Context) (chineseinla.LoginStatus, error)
+	StartLogin(context.Context) (chineseinla.LoginSessionStatus, error)
+	GetLoginSession(context.Context, string) (chineseinla.LoginSessionStatus, error)
+	SubmitPasswordLogin(context.Context, chineseinla.PasswordLoginRequest) (chineseinla.LoginSessionStatus, error)
+	CloseLoginSession()
 	CheckLogin(context.Context) (chineseinla.LoginStatus, error)
 	Forums(context.Context) ([]chineseinla.Forum, error)
 	Prepare(context.Context, chineseinla.PrepareRequest) (chineseinla.PrepareResult, error)
@@ -89,6 +92,9 @@ func (s *AppServer) Start(port string) error {
 		logrus.Warnf("等待连接关闭超时，强制退出: %v", err)
 	} else {
 		logrus.Infof("服务器已优雅关闭")
+	}
+	if s.chineseInLAService != nil {
+		s.chineseInLAService.CloseLoginSession()
 	}
 
 	return nil

@@ -98,12 +98,18 @@ func TestNotificationToolsRegistered(t *testing.T) {
 		"like_notification",
 		"get_login_session_status",
 		"submit_login_code",
+		"chineseinla_get_login_session_status",
+		"chineseinla_submit_login_password",
 	} {
 		assert.True(t, names[want], "工具 %s 应已注册", want)
 	}
 	assert.Contains(t, required["get_login_session_status"], "session_id")
 	assert.Contains(t, required["submit_login_code"], "session_id")
 	assert.Contains(t, required["submit_login_code"], "code")
+	assert.Contains(t, required["chineseinla_get_login_session_status"], "session_id")
+	assert.Contains(t, required["chineseinla_submit_login_password"], "session_id")
+	assert.Contains(t, required["chineseinla_submit_login_password"], "username")
+	assert.Contains(t, required["chineseinla_submit_login_password"], "password")
 	assert.Contains(t, required["chineseinla_prepare_post"], "confirm_preparation")
 	assert.Contains(t, required["chineseinla_publish_post"], "draft_id")
 	assert.Contains(t, required["chineseinla_publish_post"], "confirm_publish")
@@ -143,6 +149,8 @@ func TestChineseInLAToolsRegistered(t *testing.T) {
 	for _, want := range []string{
 		"check_login_status",
 		"chineseinla_open_login",
+		"chineseinla_get_login_session_status",
+		"chineseinla_submit_login_password",
 		"chineseinla_check_login",
 		"chineseinla_list_forums",
 		"chineseinla_prepare_post",
@@ -192,6 +200,23 @@ func TestLoginOTPRoutesRegistered(t *testing.T) {
 	}
 }
 
+func TestChineseInLAHeadlessLoginRoutesRegistered(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+
+	registered := make(map[string]bool)
+	for _, route := range router.Routes() {
+		registered[route.Method+" "+route.Path] = true
+	}
+
+	for _, want := range []string{
+		"POST /api/v1/chineseinla/login/start",
+		"GET /api/v1/chineseinla/login/sessions/:session_id",
+		"POST /api/v1/chineseinla/login/password",
+	} {
+		assert.True(t, registered[want], "route %s should be registered", want)
+	}
+}
+
 func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 	router := setupRoutes(NewAppServer(NewXiaohongshuService(), "secret-token"))
 
@@ -205,6 +230,7 @@ func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 		{name: "MCP requires token", method: http.MethodPost, path: "/mcp", wantStatus: http.StatusUnauthorized},
 		{name: "MCP child path requires token", method: http.MethodPost, path: "/mcp/child", wantStatus: http.StatusUnauthorized},
 		{name: "HTTP API requires token", method: http.MethodGet, path: "/api/v1/notifications/unread", wantStatus: http.StatusUnauthorized},
+		{name: "ChineseInLA password API requires token", method: http.MethodPost, path: "/api/v1/chineseinla/login/password", wantStatus: http.StatusUnauthorized},
 		{name: "CORS preflight remains public", method: http.MethodOptions, path: "/mcp", wantStatus: http.StatusNoContent},
 	}
 

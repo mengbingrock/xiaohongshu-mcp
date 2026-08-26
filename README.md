@@ -493,11 +493,21 @@ go run . -headless=false
 # 小红书和 ChineseInLA 都使用 headless 模式
 go run . -headless=true -chineseinla-headless=true
 
-# 首次登录或处理 CAPTCHA 时，保留相同配置目录并临时显示 ChineseInLA 浏览器
+# CAPTCHA 等必须人工处理的页面，可保留相同配置目录并临时显示 ChineseInLA 浏览器
 go run . -chineseinla-headless=false
 ```
 
-可用的独立参数包括 `-chineseinla-cdp-port`、`-chineseinla-profile-dir`、`-chineseinla-state-file`、`-chineseinla-preview-image` 和 `-chineseinla-browser-bin`。也可使用 `CHINESEINLA_CDP_PORT`、`CHINESEINLA_PROFILE_DIR`、`CHINESEINLA_STATE_PATH`、`CHINESEINLA_PREVIEW_PATH`、`CHINESEINLA_BROWSER_BIN`、`CHINESEINLA_HEADLESS` 环境变量。可见模式用于首次登录/人工验证；headless 准备阶段会把已填写表单的 PNG 预览作为 MCP 图片返回。
+可用的独立参数包括 `-chineseinla-cdp-port`、`-chineseinla-profile-dir`、`-chineseinla-state-file`、`-chineseinla-preview-image` 和 `-chineseinla-browser-bin`。也可使用 `CHINESEINLA_CDP_PORT`、`CHINESEINLA_PROFILE_DIR`、`CHINESEINLA_STATE_PATH`、`CHINESEINLA_PREVIEW_PATH`、`CHINESEINLA_BROWSER_BIN`、`CHINESEINLA_HEADLESS` 环境变量。Headless 首次登录会保留登录页 5 分钟，返回随机 `session_id` 和已隐藏输入值的截图；密码可提交到同一页面，成功后的会话保存在 ChineseInLA 独立 profile 中。遇到 CAPTCHA/人工验证仍会停止并报告，不会绕过。Headless 准备阶段会把已填写表单的 PNG 预览作为 MCP 图片返回。
+
+远程部署时应配置 `AUTH_TOKEN`，并只通过 HTTPS 或 SSH 隧道调用以下受保护接口；密码请求不会写入日志或响应：
+
+- `POST /api/v1/chineseinla/login/start`：创建登录会话，返回 `session_id`、状态；尚未登录时还会返回 `img`
+- `GET /api/v1/chineseinla/login/sessions/:session_id`：查询状态并取得最新的已脱敏截图
+- `POST /api/v1/chineseinla/login/password`：提交 JSON 字段 `session_id`、`username`、`password`
+
+共享或远程服务优先使用上述 HTTPS 接口，而不是把长期密码放进 MCP/模型对话。每个登录会话最多尝试 3 次，5 分钟后自动关闭；不要把 Chromium 的 CDP 端口暴露到公网。
+
+在禁用 unprivileged user namespaces 的 Linux 云主机上，ChineseInLA 的 headless Chromium 会以 `--no-sandbox` 启动；因此服务必须使用非 root 专用账号运行，并保持 HTTP API 与 CDP 仅监听 loopback，由带 `AUTH_TOKEN` 的 HTTPS 反向代理或 SSH 隧道访问。直接运行二进制的精简主机还需安装中文字体（Ubuntu 可用 `fonts-wqy-zenhei`）；项目 Docker 镜像已包含中文字体。
 
 **配置代理（可选）**：
 
@@ -940,7 +950,9 @@ npx mcporter list xiaohongshu-mcp
 
 ChineseInLA 工具（与以上小红书工具共用同一个 MCP 地址）：
 
-- `chineseinla_open_login` - 在独立浏览器配置中打开 ChineseInLA 登录页（无参数）
+- `chineseinla_open_login` - 在独立浏览器配置中创建 5 分钟登录会话，返回 `session_id` 和已脱敏截图（无参数）
+- `chineseinla_get_login_session_status` - 查询登录会话状态和最新脱敏截图（必需：`session_id`）
+- `chineseinla_submit_login_password` - 把账号密码提交到同一 headless 登录页（必需：`session_id`, `username`, `password`；远程/共享环境优先使用受保护 HTTPS 接口）
 - `chineseinla_check_login` - 检查 ChineseInLA 登录状态（无参数）
 - `chineseinla_list_forums` - 获取实时版块目录和有效 `forum_id`（无参数）
 - `chineseinla_prepare_post` - 经第一次明确确认后填写表单但不发布（必需：`forum_id`, `post_type`, `title`, `body`, `confirm_preparation=true`；媒体等参数可选）
@@ -949,7 +961,7 @@ ChineseInLA 工具（与以上小红书工具共用同一个 MCP 地址）：
   - 准备阶段可能把列出的图片上传到 ChineseInLA，因此也必须先取得用户确认
 - `chineseinla_publish_post` - 经第二次明确确认后发布当前草稿（必需：上一步的精确 `draft_id`, `confirm_publish=true`）
 
-ChineseInLA 每个服务实例同时只保留一个待发布表单，操作会串行执行；过期或不匹配的 `draft_id` 会在点击发布前被拒绝。遇到 CAPTCHA/人工验证会停止并要求用户在可见浏览器中完成，不会绕过验证。
+ChineseInLA 每个服务实例同时只保留一个登录会话和一个待发布表单，操作会串行执行；过期或不匹配的登录 `session_id` / 发帖 `draft_id` 会在提交前被拒绝。遇到 CAPTCHA/人工验证会停止并要求人工处理，不会绕过验证。
 
 ### 2.4. 使用示例
 

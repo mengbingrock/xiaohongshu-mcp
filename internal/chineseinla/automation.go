@@ -4,11 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,10 +28,17 @@ var (
 	ErrCaptcha     = errors.New("ChineseInLA requested a CAPTCHA or human verification")
 )
 
+const browserConnectTimeout = 5 * time.Second
+
 type Automation struct {
 	Config     Config
 	Downloader *ImageDownloader
 	State      StateStore
+
+	// loginSessions keeps the one short-lived page used by the headless login
+	// workflow. The zero value is ready to use, which also keeps Automation
+	// safe when tests construct it without NewAutomation.
+	loginSessions loginSessionStore
 }
 
 type LoginStatus struct {
@@ -79,7 +91,7 @@ func (a *Automation) Login(ctx context.Context) (LoginStatus, error) {
 	}
 	message := "Complete login in the dedicated ChineseInLA browser window, then run check-login."
 	if a.Config.Headless {
-		message = "The login page is open in headless Chromium. Restart with ChineseInLA visible mode and the same profile to complete interactive sign-in."
+		message = "The login page is open in headless Chromium. Use the MCP or protected HTTP login-session workflow to submit credentials to this page."
 	}
 	return LoginStatus{
 		LoggedIn: false,
@@ -93,7 +105,11 @@ func (a *Automation) CheckLogin(ctx context.Context) (LoginStatus, error) {
 	if err != nil {
 		return LoginStatus{}, err
 	}
-	page, err := openPage(browser, HomeURL, a.Config.Timeout)
+	// The public news homepage is separate from the forum application and does
+	// not reliably render forum account controls even when the forum session is
+	// authenticated. My Topics is session-gated: anonymous visitors are sent to
+	// the login page, while authenticated visitors remain on the account page.
+	page, err := openPage(browser, MyTopicsURL, a.Config.Timeout)
 	if err != nil {
 		return LoginStatus{}, err
 	}
@@ -105,7 +121,7 @@ func (a *Automation) CheckLogin(ctx context.Context) (LoginStatus, error) {
 	if !loggedIn {
 		message = "Not logged in. Run login and complete sign-in in the dedicated browser window."
 		if a.Config.Headless {
-			message = "Not logged in. Restart with ChineseInLA visible mode and the same profile, then complete sign-in."
+			message = "Not logged in. Start a retained ChineseInLA headless login session and submit credentials through the protected endpoint."
 		}
 	}
 	return LoginStatus{LoggedIn: loggedIn, URL: currentURL, Message: message}, nil
@@ -458,6 +474,15 @@ func (a *Automation) connect(ctx context.Context) (*rod.Browser, error) {
 	if a.Config.CDPPort < 1 || a.Config.CDPPort > 65535 {
 		return nil, errors.New("CDP port must be between 1 and 65535")
 	}
+	// Chromium can outlive the MCP process so that the isolated profile and
+	// login session remain available. Reconnect to that loopback-only CDP
+	// endpoint before trying to launch another process with the same profile.
+	if controlURL, err := runningBrowserControlURL(ctx, a.Config.CDPPort); err == nil {
+		browser, connectErr := connectRodBrowser(ctx, controlURL)
+		if connectErr == nil {
+			return browser, nil
+		}
+	}
 	if err := ensureDirectory(a.Config.ProfileDir); err != nil {
 		return nil, err
 	}
@@ -470,21 +495,78 @@ func (a *Automation) connect(ctx context.Context) (*rod.Browser, error) {
 		}
 	}
 
-	controlURL, err := launcher.New().
+	browserLauncher := launcher.New().
 		Bin(binary).
 		UserDataDir(a.Config.ProfileDir).
 		Headless(a.Config.Headless).
 		Leakless(false).
-		RemoteDebuggingPort(a.Config.CDPPort).
-		Launch()
+		RemoteDebuggingPort(a.Config.CDPPort)
+	// Ubuntu cloud hosts commonly disable unprivileged user namespaces, which
+	// leaves Chromium without a usable sandbox. Restrict this exception to the
+	// unprivileged Linux headless process; CDP remains bound to loopback.
+	if linuxHeadlessNeedsNoSandbox(runtime.GOOS, a.Config.Headless) {
+		browserLauncher.NoSandbox(true)
+	}
+	controlURL, err := browserLauncher.Launch()
 	if err != nil {
 		return nil, fmt.Errorf("launch or reconnect to the ChineseInLA browser: %w", err)
 	}
-	browser := rod.New().Context(ctx).ControlURL(controlURL)
-	if err := browser.Connect(); err != nil {
+	browser, err := connectRodBrowser(ctx, controlURL)
+	if err != nil {
 		return nil, fmt.Errorf("connect to the ChineseInLA browser: %w", err)
 	}
 	return browser, nil
+}
+
+func linuxHeadlessNeedsNoSandbox(goos string, headless bool) bool {
+	return goos == "linux" && headless
+}
+
+func connectRodBrowser(ctx context.Context, controlURL string) (*rod.Browser, error) {
+	connecting := rod.New().Context(ctx).ControlURL(controlURL).Timeout(browserConnectTimeout)
+	if err := connecting.Connect(); err != nil {
+		return nil, err
+	}
+	return connecting.Context(ctx), nil
+}
+
+func runningBrowserControlURL(ctx context.Context, port int) (string, error) {
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 750 * time.Millisecond}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("CDP version endpoint returned HTTP %d", response.StatusCode)
+	}
+
+	var version struct {
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&version); err != nil {
+		return "", fmt.Errorf("decode CDP version endpoint: %w", err)
+	}
+	controlURL, err := url.Parse(strings.TrimSpace(version.WebSocketDebuggerURL))
+	if err != nil {
+		return "", fmt.Errorf("parse CDP WebSocket URL: %w", err)
+	}
+	host := strings.ToLower(controlURL.Hostname())
+	if controlURL.Scheme != "ws" ||
+		(host != "127.0.0.1" && host != "localhost" && host != "::1") ||
+		controlURL.Port() != strconv.Itoa(port) ||
+		!strings.HasPrefix(controlURL.EscapedPath(), "/devtools/browser/") ||
+		controlURL.User != nil {
+		return "", errors.New("CDP version endpoint returned a non-local browser URL")
+	}
+	return controlURL.String(), nil
 }
 
 func ensureDirectory(path string) error {
