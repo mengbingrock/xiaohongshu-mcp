@@ -405,8 +405,11 @@ func (a *Automation) refreshLoginSessionLocked(session *retainedLoginSession, in
 	}
 	session.url = currentURL
 	if loggedIn {
+		if err := a.persistCookies(operationPage.Browser()); err != nil {
+			return LoginSessionStatus{}, err
+		}
 		session.state = LoginSessionAuthenticated
-		session.message = "ChineseInLA login succeeded and the isolated browser profile is ready for headless use."
+		session.message = "ChineseInLA login succeeded and its dedicated cookie file is ready for headless use."
 		if session.page != nil {
 			_ = session.page.Timeout(loginPageCloseLimit).Close()
 			session.page = nil

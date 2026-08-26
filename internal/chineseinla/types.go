@@ -68,6 +68,7 @@ func ParsePostType(value string) (PostType, error) {
 type Config struct {
 	CDPPort     int
 	ProfileDir  string
+	CookiePath  string
 	StatePath   string
 	PreviewPath string
 	BrowserBin  string
@@ -95,6 +96,10 @@ func DefaultConfig() (Config, error) {
 	if profileDir == "" {
 		profileDir = filepath.Join(root, "profile")
 	}
+	cookiePath := strings.TrimSpace(os.Getenv("CHINESEINLA_COOKIES_PATH"))
+	if cookiePath == "" {
+		cookiePath = filepath.Join(root, "cookies.json")
+	}
 	statePath := strings.TrimSpace(os.Getenv("CHINESEINLA_STATE_PATH"))
 	if statePath == "" {
 		statePath = filepath.Join(root, "prepared.json")
@@ -115,12 +120,46 @@ func DefaultConfig() (Config, error) {
 	return Config{
 		CDPPort:     port,
 		ProfileDir:  profileDir,
+		CookiePath:  cookiePath,
 		StatePath:   statePath,
 		PreviewPath: previewPath,
 		BrowserBin:  strings.TrimSpace(os.Getenv("CHINESEINLA_BROWSER_BIN")),
 		Headless:    headless,
 		Timeout:     30 * time.Second,
 	}, nil
+}
+
+// ValidateCookieIsolation prevents the two integrations from overwriting the
+// same JSON session file. Each site must retain an independently revocable
+// authentication store even when both are hosted by one MCP process.
+func ValidateCookieIsolation(chineseInLACookiePath, xiaohongshuCookiePath string) error {
+	chineseInLACookiePath = strings.TrimSpace(chineseInLACookiePath)
+	xiaohongshuCookiePath = strings.TrimSpace(xiaohongshuCookiePath)
+	if chineseInLACookiePath == "" {
+		return errors.New("ChineseInLA cookie path is empty")
+	}
+	if xiaohongshuCookiePath == "" {
+		return errors.New("Xiaohongshu cookie path is empty")
+	}
+
+	chineseAbsolute, err := filepath.Abs(chineseInLACookiePath)
+	if err != nil {
+		return fmt.Errorf("resolve ChineseInLA cookie path: %w", err)
+	}
+	xiaohongshuAbsolute, err := filepath.Abs(xiaohongshuCookiePath)
+	if err != nil {
+		return fmt.Errorf("resolve Xiaohongshu cookie path: %w", err)
+	}
+	if filepath.Clean(chineseAbsolute) == filepath.Clean(xiaohongshuAbsolute) {
+		return errors.New("ChineseInLA and Xiaohongshu cookie paths must be different")
+	}
+
+	chineseInfo, chineseErr := os.Stat(chineseAbsolute)
+	xiaohongshuInfo, xiaohongshuErr := os.Stat(xiaohongshuAbsolute)
+	if chineseErr == nil && xiaohongshuErr == nil && os.SameFile(chineseInfo, xiaohongshuInfo) {
+		return errors.New("ChineseInLA and Xiaohongshu cookie paths resolve to the same file")
+	}
+	return nil
 }
 
 type PrepareRequest struct {

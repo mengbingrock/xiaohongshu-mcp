@@ -489,7 +489,7 @@ go run . -headless=false
 
 **Enable ChineseInLA alongside RedNote**:
 
-The same `/mcp` endpoint registers both RedNote and ChineseInLA tools. ChineseInLA has its own browser profile, login state, CDP port (default `9223`), and prepared-draft state; it never reuses RedNote cookies. Its browser starts lazily only when a `chineseinla_*` tool is called.
+The same `/mcp` endpoint registers both RedNote and ChineseInLA tools. ChineseInLA has its own cookie JSON, browser profile, login state, CDP port (default `9223`), and prepared-draft state; it never reuses or overwrites RedNote cookies. Its browser starts lazily only when a `chineseinla_*` tool is called.
 
 ```bash
 # Run both RedNote and ChineseInLA headlessly
@@ -499,7 +499,7 @@ go run . -headless=true -chineseinla-headless=true
 go run . -chineseinla-headless=false
 ```
 
-Independent options include `-chineseinla-cdp-port`, `-chineseinla-profile-dir`, `-chineseinla-state-file`, `-chineseinla-preview-image`, and `-chineseinla-browser-bin`. Equivalent environment variables are `CHINESEINLA_CDP_PORT`, `CHINESEINLA_PROFILE_DIR`, `CHINESEINLA_STATE_PATH`, `CHINESEINLA_PREVIEW_PATH`, `CHINESEINLA_BROWSER_BIN`, and `CHINESEINLA_HEADLESS`. Use visible mode for initial login or manual verification; headless preparation returns a PNG of the filled form as MCP image content.
+Independent options include `-chineseinla-cdp-port`, `-chineseinla-profile-dir`, `-chineseinla-cookies-file`, `-chineseinla-state-file`, `-chineseinla-preview-image`, and `-chineseinla-browser-bin`. Equivalent environment variables are `CHINESEINLA_CDP_PORT`, `CHINESEINLA_PROFILE_DIR`, `CHINESEINLA_COOKIES_PATH`, `CHINESEINLA_STATE_PATH`, `CHINESEINLA_PREVIEW_PATH`, `CHINESEINLA_BROWSER_BIN`, and `CHINESEINLA_HEADLESS`. After a successful login, ChineseInLA-domain cookies are written to the dedicated JSON file with mode `0600` and restored before later navigation. A still-valid cookie file can therefore authenticate a fresh profile, while the persistent profile remains a compatibility fallback for CAPTCHA, local storage, and browser continuity. The main server rejects configurations that point ChineseInLA and RedNote at the same cookie file. Use visible mode for initial login or manual verification; headless preparation returns a PNG of the filled form as MCP image content.
 
 **Configure a proxy (optional)**:
 

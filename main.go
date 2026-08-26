@@ -31,10 +31,14 @@ func main() {
 	flag.BoolVar(&chineseInLAConfig.Headless, "chineseinla-headless", chineseInLAConfig.Headless, "ChineseInLA 是否使用无头模式")
 	flag.IntVar(&chineseInLAConfig.CDPPort, "chineseinla-cdp-port", chineseInLAConfig.CDPPort, "ChineseInLA 专用 Chrome DevTools 端口")
 	flag.StringVar(&chineseInLAConfig.ProfileDir, "chineseinla-profile-dir", chineseInLAConfig.ProfileDir, "ChineseInLA 独立浏览器配置目录")
+	flag.StringVar(&chineseInLAConfig.CookiePath, "chineseinla-cookies-file", chineseInLAConfig.CookiePath, "ChineseInLA 独立 cookies JSON 文件")
 	flag.StringVar(&chineseInLAConfig.StatePath, "chineseinla-state-file", chineseInLAConfig.StatePath, "ChineseInLA 待发布草稿状态文件")
 	flag.StringVar(&chineseInLAConfig.PreviewPath, "chineseinla-preview-image", chineseInLAConfig.PreviewPath, "ChineseInLA 无头预览图片路径")
 	flag.StringVar(&chineseInLAConfig.BrowserBin, "chineseinla-browser-bin", chineseInLAConfig.BrowserBin, "ChineseInLA 浏览器可执行文件")
 	flag.Parse()
+	if err := chineseinla.ValidateCookieIsolation(chineseInLAConfig.CookiePath, cookies.GetCookiesFilePath()); err != nil {
+		logrus.Fatalf("invalid cookie configuration: %v", err)
+	}
 	if token == "" {
 		token = os.Getenv("AUTH_TOKEN")
 	}
