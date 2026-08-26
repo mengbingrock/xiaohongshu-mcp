@@ -112,7 +112,25 @@ func (c *localCookie) write(cks []byte, seed int) error {
 		}
 	}
 
-	return os.WriteFile(c.path, data, 0644)
+	// OpenFile's mode only applies when creating a file, so explicitly chmod
+	// before writing as well. This also repairs legacy cookie files that were
+	// created world-readable with 0644.
+	file, err := os.OpenFile(c.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return errors.Wrap(err, "open session file for writing")
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return errors.Wrap(err, "secure session file permissions")
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return errors.Wrap(err, "write session file")
+	}
+	if err := file.Close(); err != nil {
+		return errors.Wrap(err, "close session file")
+	}
+	return nil
 }
 
 // DeleteCookies 删除 cookies 文件。

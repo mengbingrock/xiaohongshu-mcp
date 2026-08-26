@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -87,7 +88,10 @@ func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
 
 	// 已登录：文本 + 图片
 	contents := []MCPContent{
-		{Type: "text", Text: "请用小红书 App 在 " + deadline + " 前扫码登录 👇"},
+		{Type: "text", Text: fmt.Sprintf(
+			"请用小红书 App 在 %s 前扫码登录 👇\n登录会话 ID: %s\n扫码后如果页面要求输入验证码，请调用 submit_login_code；可先调用 get_login_session_status 查询状态。",
+			deadline, result.SessionID,
+		)},
 		{
 			Type:     "image",
 			MimeType: "image/png",
@@ -95,6 +99,84 @@ func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
 		},
 	}
 	return &MCPToolResult{Content: contents}
+}
+
+func describeLoginSessionState(state LoginSessionState) string {
+	switch state {
+	case LoginSessionWaitingForScan:
+		return "等待扫码"
+	case LoginSessionQRScanned:
+		return "二维码已扫描，等待小红书确认"
+	case LoginSessionOTPRequired:
+		return "需要输入验证码"
+	case LoginSessionSubmittingOTP:
+		return "正在提交验证码"
+	case LoginSessionOTPSubmitted:
+		return "验证码已提交，等待登录完成"
+	case LoginSessionCaptchaNeeded:
+		return "需要人工完成 CAPTCHA，不能通过验证码工具绕过"
+	case LoginSessionAuthenticated:
+		return "登录成功"
+	case LoginSessionExpired:
+		return "登录会话已过期"
+	case LoginSessionCancelled:
+		return "登录会话已被新的二维码取代"
+	case LoginSessionFailed:
+		return "登录失败"
+	default:
+		return string(state)
+	}
+}
+
+func (s *AppServer) handleGetLoginSessionStatus(ctx context.Context, sessionID string) *MCPToolResult {
+	status, err := s.xiaohongshuService.GetLoginSessionStatus(ctx, sessionID)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{Type: "text", Text: "查询登录会话失败：会话不存在或已被替换。请重新获取二维码。"}},
+			IsError: true,
+		}
+	}
+
+	text := fmt.Sprintf("登录会话状态：%s\n会话 ID: %s\n验证码提交次数: %d/%d",
+		describeLoginSessionState(status.State), status.SessionID, status.Attempts, maxLoginCodeAttempts)
+	if status.LastError != "" {
+		text += "\n页面提示: " + status.LastError
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: text}}}
+}
+
+func (s *AppServer) handleSubmitLoginCode(ctx context.Context, sessionID, code string) *MCPToolResult {
+	// Never log or echo code: it is a short-lived login credential.
+	status, err := s.xiaohongshuService.SubmitLoginCode(ctx, SubmitLoginCodeRequest{
+		SessionID: sessionID,
+		Code:      code,
+	})
+	if err == nil {
+		return &MCPToolResult{Content: []MCPContent{{
+			Type: "text",
+			Text: "验证码已提交到扫码所使用的 headless 页面。当前状态：" + describeLoginSessionState(status.State),
+		}}}
+	}
+
+	message := "提交验证码失败"
+	switch {
+	case errors.Is(err, xiaohongshu.ErrInvalidVerificationCode):
+		message = "验证码必须是 6 位数字"
+	case errors.Is(err, ErrLoginSessionNotFound), errors.Is(err, ErrLoginSessionClosed):
+		message = "登录会话不存在或已经结束，请重新获取二维码"
+	case errors.Is(err, ErrLoginCodeAttemptsExceeded):
+		message = "验证码尝试次数已达上限，请重新获取二维码"
+	case errors.Is(err, ErrLoginCodeSubmissionPending):
+		message = "已有验证码正在提交，请稍后查询登录会话状态"
+	case errors.Is(err, xiaohongshu.ErrVerificationCodeInputNotFound),
+		errors.Is(err, xiaohongshu.ErrVerificationCodeSubmitNotFound),
+		errors.Is(err, ErrLoginCodeNotRequired):
+		message = "扫码页面尚未显示验证码输入框；请确认已扫码并且小红书明确要求输入验证码"
+	}
+	return &MCPToolResult{
+		Content: []MCPContent{{Type: "text", Text: message}},
+		IsError: true,
+	}
 }
 
 // handleDeleteCookies 处理删除 cookies 请求，用于登录重置

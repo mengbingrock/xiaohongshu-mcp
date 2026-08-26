@@ -800,7 +800,7 @@ Usage steps:
 
 - Use MCP Inspector to test connection
 - Test Ping Server functionality to verify connection
-- Check if List Tools returns 23 tools
+- Check if List Tools returns 25 tools
 
 </details>
 
@@ -900,7 +900,10 @@ Basic configuration template:
 After successful connection, you can use the following MCP tools:
 
 - `check_login_status` - Check RedNote login status (no parameters)
-- `get_login_qrcode` - Get login QR code, returns Base64 image and timeout (no parameters)
+- `get_login_qrcode` - Get a login QR code plus its timeout and random `session_id` (no parameters)
+- `get_login_session_status` - Check whether the QR session is scanned, requires OTP/CAPTCHA, or is authenticated (required: `session_id`)
+- `submit_login_code` - If RedNote requests an OTP after QR scan, enter the 6-digit code in the original headless page (required: `session_id`, `code`)
+  - The server never logs or echoes the OTP. In a shared cloud, prefer the HTTPS- and `AUTH_TOKEN`-protected `/api/v1/login/code` endpoint so the code does not enter model/client history.
 - `delete_cookies` - Delete cookies file, reset login status, requires re-login after deletion (no parameters)
 - `publish_content` - Publish image-text content to RedNote (required: title, content, images)
   - `images`: Image path list (minimum 1), supports HTTP links or local absolute paths, local paths recommended

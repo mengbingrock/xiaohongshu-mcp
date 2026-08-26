@@ -49,9 +49,19 @@ type LoginStatusResponse struct {
 
 // LoginQrcodeResponse 登录扫码二维码
 type LoginQrcodeResponse struct {
-	Timeout    string `json:"timeout"`
-	IsLoggedIn bool   `json:"is_logged_in"`
-	Img        string `json:"img,omitempty"`
+	Timeout    string            `json:"timeout"`
+	IsLoggedIn bool              `json:"is_logged_in"`
+	Img        string            `json:"img,omitempty"`
+	SessionID  string            `json:"session_id,omitempty"`
+	State      LoginSessionState `json:"state,omitempty"`
+	ExpiresAt  time.Time         `json:"expires_at,omitempty"`
+}
+
+// SubmitLoginCodeRequest submits an OTP to the browser page retained by a QR
+// login session. Code is a string so leading zeroes are preserved.
+type SubmitLoginCodeRequest struct {
+	SessionID string `json:"session_id" binding:"required"`
+	Code      string `json:"code" binding:"required"`
 }
 
 // PublishResponse 发布响应
@@ -154,12 +164,17 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	}
 
 	timeout := 4 * time.Minute
+	var session *loginSession
 
 	if !loggedIn {
-		s.waitScanInBackground(loginAction, page, deferFunc, timeout)
+		session, err = s.waitScanInBackground(loginAction, page, deferFunc, timeout)
+		if err != nil {
+			deferFunc()
+			return nil, err
+		}
 	}
 
-	return &LoginQrcodeResponse{
+	response := &LoginQrcodeResponse{
 		Timeout: func() string {
 			if loggedIn {
 				return "0s"
@@ -168,7 +183,16 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 		}(),
 		Img:        img,
 		IsLoggedIn: loggedIn,
-	}, nil
+	}
+	if session != nil {
+		response.SessionID = session.id
+		// The background observer may already be updating session.state. The QR
+		// response deliberately reports the initial state; callers use the
+		// session-status endpoint for subsequent transitions.
+		response.State = LoginSessionWaitingForScan
+		response.ExpiresAt = session.expiresAt
+	}
+	return response, nil
 }
 
 // waitScanInBackground 在后台等用户扫码，扫上了就存 cookie。
@@ -177,28 +201,83 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 // 再取一次二维码就会把上一个还在等的会话关掉，同一时刻只留一个。
 func (s *XiaohongshuService) waitScanInBackground(
 	loginAction *xiaohongshu.LoginAction, page *rod.Page, closeBrowser func(), timeout time.Duration,
-) {
+) (*loginSession, error) {
 	ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
-	seq := s.logins.start(cancel)
-	logrus.Infof("等待扫码登录，会话 #%d，超时 %s", seq, timeout)
+	session, err := s.logins.start(cancel, loginAction.SubmitVerificationCode, time.Now().Add(timeout))
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create login session: %w", err)
+	}
+	logrus.Infof("等待扫码登录，会话 #%d，超时 %s", session.seq, timeout)
 
 	go func() {
-		defer closeBrowser()
+		defer session.withPageOperation(closeBrowser)
 		defer cancel()
-		defer s.logins.finish(seq)
 
-		if loginAction.WaitForLogin(ctxTimeout) {
-			if err := saveCookies(page); err != nil {
-				logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d: %v", seq, err)
+		if loginAction.WaitForLoginWithState(ctxTimeout, func(observation xiaohongshu.LoginObservation) {
+			s.logins.observe(session, mapLoginPageState(observation.State), observation.Message)
+		}) {
+			var saveErr error
+			session.withPageOperation(func() {
+				saveErr = saveCookies(page)
+			})
+			if saveErr != nil {
+				s.logins.finish(session, LoginSessionFailed, "save cookies failed")
+				logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d: %v", session.seq, saveErr)
 				return
 			}
-			logrus.Infof("扫码登录成功，cookies 已保存，会话 #%d", seq)
+			s.logins.finish(session, LoginSessionAuthenticated, "")
+			logrus.Infof("扫码登录成功，cookies 已保存，会话 #%d", session.seq)
 			return
 		}
 
 		// 没等到扫码：要么超时，要么被新取的二维码取代
-		logrus.Infof("登录会话 #%d 结束，未检测到扫码（超时或已被新的二维码取代）", seq)
+		if ctxTimeout.Err() == context.DeadlineExceeded {
+			s.logins.finish(session, LoginSessionExpired, "")
+		} else {
+			s.logins.finish(session, LoginSessionCancelled, "")
+		}
+		logrus.Infof("登录会话 #%d 结束，未检测到扫码（超时或已被新的二维码取代）", session.seq)
 	}()
+
+	return session, nil
+}
+
+func mapLoginPageState(state xiaohongshu.LoginPageState) LoginSessionState {
+	switch state {
+	case xiaohongshu.LoginPageQRScanned:
+		return LoginSessionQRScanned
+	case xiaohongshu.LoginPageOTPRequired:
+		return LoginSessionOTPRequired
+	case xiaohongshu.LoginPageCaptchaNeeded:
+		return LoginSessionCaptchaNeeded
+	case xiaohongshu.LoginPageAuthenticated:
+		return LoginSessionAuthenticated
+	default:
+		return LoginSessionWaitingForScan
+	}
+}
+
+// GetLoginSessionStatus returns the latest state observed on the retained page.
+func (s *XiaohongshuService) GetLoginSessionStatus(_ context.Context, sessionID string) (*LoginSessionStatus, error) {
+	status, err := s.logins.status(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// SubmitLoginCode enters the OTP into the same headless page that generated the
+// QR code. The code is validated before it reaches the browser session manager.
+func (s *XiaohongshuService) SubmitLoginCode(ctx context.Context, req SubmitLoginCodeRequest) (*LoginSessionStatus, error) {
+	if err := xiaohongshu.ValidateVerificationCode(req.Code); err != nil {
+		return nil, err
+	}
+	status, err := s.logins.submitCode(ctx, req.SessionID, req.Code)
+	if err != nil {
+		return &status, err
+	}
+	return &status, nil
 }
 
 // PublishContent 发布内容

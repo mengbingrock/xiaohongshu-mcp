@@ -77,6 +77,9 @@ func TestLoadSaveDeleteCookies(t *testing.T) {
 	// 落盘是 v2 外层对象，不再是裸数组。只看结构，不看排版
 	onDisk, err := os.ReadFile(path)
 	assert.NoError(t, err)
+	info, err := os.Stat(path)
+	assert.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 	var f map[string]any
 	assert.NoError(t, json.Unmarshal(onDisk, &f))
 	assert.Equal(t, float64(2), f["version"])
@@ -85,6 +88,18 @@ func TestLoadSaveDeleteCookies(t *testing.T) {
 	assert.NoError(t, c.DeleteCookies())
 	assert.NoFileExists(t, path)
 	assert.NoError(t, c.DeleteCookies())
+}
+
+func TestSaveCookies_TightensLegacyFilePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.json")
+	assert.NoError(t, os.WriteFile(path, []byte(`[]`), 0644))
+
+	c := NewLoadCookie(path)
+	assert.NoError(t, c.SaveCookies([]byte(`[{"name":"web_session","value":"new"}]`)))
+
+	info, err := os.Stat(path)
+	assert.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 }
 
 // TestSeed 校验 seed 的持久化与 v1/v2 两种格式的读取。

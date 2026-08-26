@@ -1,42 +1,259 @@
 package main
 
-import "sync"
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
 
-// loginSessions 管理「已发出二维码、还在等扫码」的登录会话。
-//
-// 取一次二维码就要留一个浏览器活着等扫码，否则检测不到登录、也存不了 cookie。
-// 但没有任何东西拦着重复调用，于是每调一次就多一个浏览器活到超时为止。
-// 这里的约束是：同一时刻只保留一个待扫码会话，开新的就把旧的关掉。
-type loginSessions struct {
-	mu     sync.Mutex
-	seq    uint64
-	cancel func()
+const maxLoginCodeAttempts = 3
+
+var loginStatusSixDigitPattern = regexp.MustCompile(`[0-9]{6}`)
+
+var (
+	ErrLoginSessionNotFound       = errors.New("login session not found")
+	ErrLoginSessionClosed         = errors.New("login session is no longer active")
+	ErrLoginCodeAttemptsExceeded  = errors.New("too many login code attempts")
+	ErrLoginCodeSubmissionPending = errors.New("a login code submission is already in progress")
+	ErrLoginCodeNotRequired       = errors.New("the login page is not requesting a verification code")
+)
+
+// LoginSessionState 是云端登录浏览器当前所处的阶段。
+type LoginSessionState string
+
+const (
+	LoginSessionWaitingForScan LoginSessionState = "waiting_for_scan"
+	LoginSessionQRScanned      LoginSessionState = "qr_scanned"
+	LoginSessionOTPRequired    LoginSessionState = "otp_required"
+	LoginSessionSubmittingOTP  LoginSessionState = "submitting_otp"
+	LoginSessionOTPSubmitted   LoginSessionState = "otp_submitted"
+	LoginSessionCaptchaNeeded  LoginSessionState = "captcha_required"
+	LoginSessionAuthenticated  LoginSessionState = "authenticated"
+	LoginSessionFailed         LoginSessionState = "failed"
+	LoginSessionExpired        LoginSessionState = "expired"
+	LoginSessionCancelled      LoginSessionState = "cancelled"
+)
+
+// LoginSessionStatus 是可以安全返回给 API/MCP 客户端的会话快照。
+// 不包含浏览器、页面、验证码或取消函数。
+type LoginSessionStatus struct {
+	SessionID string            `json:"session_id"`
+	State     LoginSessionState `json:"state"`
+	ExpiresAt time.Time         `json:"expires_at"`
+	Attempts  int               `json:"attempts"`
+	LastError string            `json:"last_error,omitempty"`
 }
 
-// start 结束上一个待扫码会话（如果有），登记新的，返回本次会话的序号。
-// 序号用于 finish 判断自己是不是仍然是当前会话。
-func (l *loginSessions) start(cancel func()) uint64 {
+type loginCodeSubmitter func(context.Context, string) error
+
+// loginSession 持有一次二维码登录所对应的浏览器操作。
+// opMu 保证提交验证码、保存 cookies 和关闭浏览器不会同时操作同一页面。
+type loginSession struct {
+	seq       uint64
+	id        string
+	expiresAt time.Time
+	cancel    context.CancelFunc
+	submit    loginCodeSubmitter
+	opMu      sync.Mutex
+
+	state     LoginSessionState
+	attempts  int
+	lastError string
+}
+
+func (s *loginSession) snapshot() LoginSessionStatus {
+	return LoginSessionStatus{
+		SessionID: s.id,
+		State:     s.state,
+		ExpiresAt: s.expiresAt,
+		Attempts:  s.attempts,
+		LastError: s.lastError,
+	}
+}
+
+func (s *loginSession) withPageOperation(fn func()) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	fn()
+}
+
+// loginSessions 管理当前唯一一份「二维码已发出、浏览器仍存活」的登录会话。
+// 新会话会取消旧会话；外部只看到不可预测的随机 ID，而不是内部递增序号。
+type loginSessions struct {
+	mu      sync.Mutex
+	seq     uint64
+	current *loginSession
+}
+
+func randomLoginSessionID() (string, error) {
+	var raw [24]byte // 192 bits; opaque and safe to expose as the lookup key.
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
+func (l *loginSessions) start(cancel context.CancelFunc, submit loginCodeSubmitter, expiresAt time.Time) (*loginSession, error) {
+	id, err := randomLoginSessionID()
+	if err != nil {
+		return nil, err
+	}
+
 	l.mu.Lock()
-	prev := l.cancel
+	previous := l.current
+	var previousCancel context.CancelFunc
+	if previous != nil && previous.cancel != nil {
+		previousCancel = previous.cancel
+		previous.cancel = nil
+		previous.submit = nil
+		previous.state = LoginSessionCancelled
+	}
+
 	l.seq++
-	seq := l.seq
-	l.cancel = cancel
+	session := &loginSession{
+		seq:       l.seq,
+		id:        id,
+		expiresAt: expiresAt,
+		cancel:    cancel,
+		submit:    submit,
+		state:     LoginSessionWaitingForScan,
+	}
+	l.current = session
 	l.mu.Unlock()
 
-	// 放到锁外调用：取消动作会触发对方 goroutine 的收尾，避免相互等待
-	if prev != nil {
-		prev()
+	// 取消动作会触发旧 goroutine 的收尾，必须放在管理锁外。
+	if previousCancel != nil {
+		previousCancel()
 	}
-	return seq
+	return session, nil
 }
 
-// finish 会话自己结束时清理登记。仅当它仍是当前会话才清，
-// 否则会把后来者的登记抹掉，导致后来者永远不会被 start 关闭。
-func (l *loginSessions) finish(seq uint64) {
+func (l *loginSessions) observe(session *loginSession, state LoginSessionState, lastError string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.seq == seq {
-		l.cancel = nil
+	if l.current != session || session.cancel == nil {
+		return
 	}
+
+	// 提交后页面可能短暂仍呈现验证码框。没有错误文字时不要把状态倒退。
+	if session.state == LoginSessionOTPSubmitted && lastError == "" {
+		switch state {
+		case LoginSessionWaitingForScan, LoginSessionQRScanned, LoginSessionOTPRequired:
+			return
+		}
+	}
+
+	session.state = state
+	session.lastError = sanitizeLoginStatusMessage(lastError)
+}
+
+func sanitizeLoginStatusMessage(message string) string {
+	return loginStatusSixDigitPattern.ReplaceAllString(strings.TrimSpace(message), "[redacted]")
+}
+
+func (l *loginSessions) finish(session *loginSession, state LoginSessionState, lastError string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.current != session || session.cancel == nil {
+		return
+	}
+	session.cancel = nil
+	session.submit = nil
+	session.state = state
+	session.lastError = lastError
+}
+
+func (l *loginSessions) status(sessionID string) (LoginSessionStatus, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.current == nil || l.current.id != sessionID {
+		return LoginSessionStatus{}, ErrLoginSessionNotFound
+	}
+	return l.current.snapshot(), nil
+}
+
+func (l *loginSessions) submitCode(ctx context.Context, sessionID, code string) (LoginSessionStatus, error) {
+	l.mu.Lock()
+	if l.current == nil || l.current.id != sessionID {
+		l.mu.Unlock()
+		return LoginSessionStatus{}, ErrLoginSessionNotFound
+	}
+
+	session := l.current
+	if time.Now().After(session.expiresAt) {
+		cancel := session.cancel
+		session.state = LoginSessionExpired
+		session.cancel = nil
+		session.submit = nil
+		status := session.snapshot()
+		l.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return status, ErrLoginSessionClosed
+	}
+	if session.cancel == nil || session.submit == nil {
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, ErrLoginSessionClosed
+	}
+	if session.state == LoginSessionSubmittingOTP || session.state == LoginSessionOTPSubmitted {
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, ErrLoginCodeSubmissionPending
+	}
+	switch session.state {
+	case LoginSessionAuthenticated, LoginSessionFailed, LoginSessionExpired, LoginSessionCancelled:
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, ErrLoginSessionClosed
+	case LoginSessionWaitingForScan, LoginSessionCaptchaNeeded:
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, ErrLoginCodeNotRequired
+	}
+	if session.attempts >= maxLoginCodeAttempts {
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, ErrLoginCodeAttemptsExceeded
+	}
+
+	previousState := session.state
+	session.attempts++
+	session.state = LoginSessionSubmittingOTP
+	session.lastError = ""
+	submit := session.submit
+	l.mu.Unlock()
+
+	session.opMu.Lock()
+	err := submit(ctx, code)
+	session.opMu.Unlock()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.current != session || session.cancel == nil {
+		return session.snapshot(), ErrLoginSessionClosed
+	}
+	if err != nil {
+		// A DOM/CDP failure means no code was accepted by the page; do not burn
+		// one of the three credential attempts before the submit click succeeds.
+		// Do not retain the raw automation error: browser errors can include DOM
+		// values, while session status is safe to expose through API and MCP.
+		session.attempts--
+		session.state = previousState
+		session.lastError = "verification code form submission failed"
+		return session.snapshot(), err
+	}
+
+	session.state = LoginSessionOTPSubmitted
+	session.lastError = ""
+	return session.snapshot(), nil
 }
