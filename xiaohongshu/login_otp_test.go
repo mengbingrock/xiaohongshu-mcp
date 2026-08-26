@@ -37,6 +37,13 @@ func TestClassifyLoginDOMObservation(t *testing.T) {
 			want: LoginPageOTPRequired,
 		},
 		{
+			name: "SMS modal mount before input is a scanned transition",
+			dom: loginDOMObservation{
+				CaptchaVisible: true, QRScanned: true, SMSModalVisible: true,
+			},
+			want: LoginPageQRScanned,
+		},
+		{
 			name: "real captcha without scanned OTP",
 			dom:  loginDOMObservation{CaptchaVisible: true, QRScanned: true},
 			want: LoginPageCaptchaNeeded,

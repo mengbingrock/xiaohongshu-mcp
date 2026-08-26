@@ -54,11 +54,12 @@ type LoginObservation struct {
 // regression-test: Xiaohongshu's SMS modal is named "r-captcha-modal" even
 // though it is an OTP prompt rather than an interactive CAPTCHA challenge.
 type loginDOMObservation struct {
-	Authenticated  bool   `json:"authenticated"`
-	CaptchaVisible bool   `json:"captchaVisible"`
-	QRScanned      bool   `json:"qrScanned"`
-	OTPVisible     bool   `json:"otpVisible"`
-	Message        string `json:"message,omitempty"`
+	Authenticated   bool   `json:"authenticated"`
+	CaptchaVisible  bool   `json:"captchaVisible"`
+	QRScanned       bool   `json:"qrScanned"`
+	SMSModalVisible bool   `json:"smsModalVisible"`
+	OTPVisible      bool   `json:"otpVisible"`
+	Message         string `json:"message,omitempty"`
 }
 
 func NewLogin(page *rod.Page) *LoginAction {
@@ -80,6 +81,11 @@ func classifyLoginDOMObservation(dom loginDOMObservation) LoginObservation {
 		return LoginObservation{State: LoginPageAuthenticated}
 	case dom.OTPVisible && dom.QRScanned:
 		return LoginObservation{State: LoginPageOTPRequired, Message: dom.Message}
+	case dom.SMSModalVisible && dom.QRScanned:
+		// The SMS modal mounts before its input. During that brief window its
+		// captcha-named CSS must remain a scanned transition, not a terminal
+		// interactive CAPTCHA.
+		return LoginObservation{State: LoginPageQRScanned}
 	case dom.CaptchaVisible:
 		return LoginObservation{State: LoginPageCaptchaNeeded, Message: dom.Message}
 	case dom.QRScanned:
@@ -285,21 +291,21 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 		const qr = document.querySelector(".login-container .qrcode-img");
 		const qrScanned = scannedText || !!scannedMarker || (!!qr && !visible(qr));
 
+		const smsModal = Array.from(document.querySelectorAll(".r-captcha-modal")).find(visible);
 		const otp = Array.from(document.querySelectorAll(
 			'.r-captcha-modal input[placeholder*="验证码"], ' +
 			'.r-captcha-modal input[autocomplete="one-time-code"], ' +
 			'.r-captcha-modal input[maxlength="6"]'
 		)).find(visible);
-		const otpModal = otp && otp.closest(".r-captcha-modal");
 		const captcha = Array.from(document.querySelectorAll(
 			'iframe[src*="captcha"], [class*="captcha"], [id*="captcha"]'
 		)).find((el) => {
 			if (!visible(el)) return false;
 			// Xiaohongshu calls its SMS-code dialog a captcha modal. Exclude
 			// that exact modal while still detecting a separate challenge.
-			if (!otpModal) return true;
+			if (!smsModal) return true;
 			return !(
-				el === otpModal || otpModal.contains(el) || el.contains(otpModal)
+				el === smsModal || smsModal.contains(el) || el.contains(smsModal)
 			);
 		});
 		const errorNode = Array.from(document.querySelectorAll(
@@ -311,6 +317,7 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 			authenticated,
 			captchaVisible: !!captcha,
 			qrScanned,
+			smsModalVisible: !!smsModal,
 			otpVisible: !!otp,
 			message,
 		});
