@@ -22,6 +22,8 @@ type fakeChineseInLAService struct {
 	loginSession     chineseinla.LoginSessionStatus
 	checkLoginResult chineseinla.LoginStatus
 	forumsResult     []chineseinla.Forum
+	listPostsResult  chineseinla.ListPostsResult
+	readPostResult   chineseinla.ReadPostResult
 	prepareResult    chineseinla.PrepareResult
 	publishResult    chineseinla.PublishResult
 	err              error
@@ -36,6 +38,10 @@ type fakeChineseInLAService struct {
 	loginSessionID   string
 	passwordRequest  chineseinla.PasswordLoginRequest
 	closeLoginCalls  int
+	listPostsCalls   int
+	readPostCalls    int
+	listPostsRequest chineseinla.ListPostsRequest
+	readPostRequest  chineseinla.ReadPostRequest
 }
 
 func (f *fakeChineseInLAService) Login(context.Context) (chineseinla.LoginStatus, error) {
@@ -69,6 +75,18 @@ func (f *fakeChineseInLAService) CheckLogin(context.Context) (chineseinla.LoginS
 
 func (f *fakeChineseInLAService) Forums(context.Context) ([]chineseinla.Forum, error) {
 	return f.forumsResult, f.err
+}
+
+func (f *fakeChineseInLAService) ListPosts(_ context.Context, request chineseinla.ListPostsRequest) (chineseinla.ListPostsResult, error) {
+	f.listPostsCalls++
+	f.listPostsRequest = request
+	return f.listPostsResult, f.err
+}
+
+func (f *fakeChineseInLAService) ReadPost(_ context.Context, request chineseinla.ReadPostRequest) (chineseinla.ReadPostResult, error) {
+	f.readPostCalls++
+	f.readPostRequest = request
+	return f.readPostResult, f.err
 }
 
 func (f *fakeChineseInLAService) Prepare(_ context.Context, request chineseinla.PrepareRequest) (chineseinla.PrepareResult, error) {
@@ -196,6 +214,27 @@ func TestChineseInLAPublishRequiresSecondConfirmationAndExactDraft(t *testing.T)
 	assert.Equal(t, 1, fake.publishCalls)
 	assert.Equal(t, "draft-123", fake.publishedDraftID)
 	assert.True(t, fake.publishConfirmed)
+}
+
+func TestChineseInLAListAndReadPostsPassExactIdentifiers(t *testing.T) {
+	t.Parallel()
+	fake := &fakeChineseInLAService{
+		listPostsResult: chineseinla.ListPostsResult{Status: "ok", Posts: []chineseinla.ForumPost{{TopicID: 3138499}}},
+		readPostResult:  chineseinla.ReadPostResult{Status: "ok", TopicID: 3138499, Messages: []chineseinla.TopicMessage{{PostID: 4399652, Body: "测试正文"}}},
+	}
+	server := &AppServer{chineseInLAService: fake}
+
+	listed := server.handleChineseInLAListPosts(t.Context(), ChineseInLAListPostsArgs{CategoryID: 6, ForumID: 102, Page: 2, Limit: 5})
+	require.False(t, listed.IsError)
+	assert.Contains(t, listed.Content[0].Text, `"topic_id": 3138499`)
+	assert.Equal(t, chineseinla.ListPostsRequest{CategoryID: 6, ForumID: 102, Page: 2, Limit: 5}, fake.listPostsRequest)
+
+	read := server.handleChineseInLAReadPost(t.Context(), ChineseInLAReadPostArgs{CategoryID: 6, ForumID: 102, TopicID: 3138499, Page: 1, Limit: 3})
+	require.False(t, read.IsError)
+	assert.Contains(t, read.Content[0].Text, `"post_id": 4399652`)
+	assert.Equal(t, chineseinla.ReadPostRequest{CategoryID: 6, ForumID: 102, TopicID: 3138499, Page: 1, Limit: 3}, fake.readPostRequest)
+	assert.Equal(t, 1, fake.listPostsCalls)
+	assert.Equal(t, 1, fake.readPostCalls)
 }
 
 func TestChineseInLAErrorsExplainManualVerification(t *testing.T) {

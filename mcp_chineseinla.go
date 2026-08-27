@@ -41,6 +41,21 @@ type ChineseInLASubmitLoginPasswordArgs struct {
 	Password  string `json:"password" jsonschema:"ChineseInLA account password; never logged or echoed"`
 }
 
+type ChineseInLAListPostsArgs struct {
+	CategoryID int `json:"category_id" jsonschema:"ChineseInLA category/group ID returned by chineseinla_list_forums"`
+	ForumID    int `json:"forum_id" jsonschema:"ChineseInLA forum ID returned by chineseinla_list_forums"`
+	Page       int `json:"page,omitempty" jsonschema:"One-based forum page number; defaults to 1"`
+	Limit      int `json:"limit,omitempty" jsonschema:"Maximum topics to return from this page, 1 through 15; defaults to 15"`
+}
+
+type ChineseInLAReadPostArgs struct {
+	CategoryID int `json:"category_id" jsonschema:"ChineseInLA category/group ID returned by chineseinla_list_forums"`
+	ForumID    int `json:"forum_id" jsonschema:"ChineseInLA forum ID returned by chineseinla_list_forums"`
+	TopicID    int `json:"topic_id" jsonschema:"ChineseInLA topic ID returned by chineseinla_list_posts"`
+	Page       int `json:"page,omitempty" jsonschema:"One-based topic page number; defaults to 1"`
+	Limit      int `json:"limit,omitempty" jsonschema:"Maximum messages to return from this page, 1 through 10; defaults to 10"`
+}
+
 func registerChineseInLATools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
@@ -89,11 +104,33 @@ func registerChineseInLATools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "chineseinla_list_forums",
-			Description: "Read the live ChineseInLA forum catalog and return valid forum IDs. Call this before preparing a post instead of guessing a forum ID.",
+			Description: "Read the live ChineseInLA forum catalog and return valid category/group IDs and forum IDs. Call this before listing topics or preparing a post instead of guessing IDs.",
 			Annotations: &mcp.ToolAnnotations{Title: "List ChineseInLA Forums", ReadOnlyHint: true},
 		},
 		withPanicRecovery("chineseinla_list_forums", func(ctx context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
 			return convertToMCPResult(appServer.handleChineseInLAListForums(ctx)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_list_posts",
+			Description: "List topics from one live ChineseInLA forum. category_id and forum_id must be the matching pair returned by chineseinla_list_forums. Returns topic IDs for chineseinla_read_post. Read-only; never prepares, replies to, or publishes a post.",
+			Annotations: &mcp.ToolAnnotations{Title: "List ChineseInLA Posts", ReadOnlyHint: true},
+		},
+		withPanicRecovery("chineseinla_list_posts", func(ctx context.Context, _ *mcp.CallToolRequest, args ChineseInLAListPostsArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLAListPosts(ctx, args)), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_read_post",
+			Description: "Read one ChineseInLA topic and its messages by topic ID. The category_id and forum_id are validated against the live catalog and the topic breadcrumb. Read-only; never likes, replies to, edits, or publishes a post.",
+			Annotations: &mcp.ToolAnnotations{Title: "Read ChineseInLA Post", ReadOnlyHint: true},
+		},
+		withPanicRecovery("chineseinla_read_post", func(ctx context.Context, _ *mcp.CallToolRequest, args ChineseInLAReadPostArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLAReadPost(ctx, args)), nil, nil
 		}),
 	)
 
@@ -205,6 +242,45 @@ func (s *AppServer) handleChineseInLAListForums(ctx context.Context) *MCPToolRes
 		Count  int                 `json:"count"`
 		Forums []chineseinla.Forum `json:"forums"`
 	}{Status: "ok", Count: len(forums), Forums: forums})
+}
+
+func (s *AppServer) handleChineseInLAListPosts(ctx context.Context, args ChineseInLAListPostsArgs) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+
+	result, err := s.chineseInLAService.ListPosts(ctx, chineseinla.ListPostsRequest{
+		CategoryID: args.CategoryID,
+		ForumID:    args.ForumID,
+		Page:       args.Page,
+		Limit:      args.Limit,
+	})
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLAJSONResult(result)
+}
+
+func (s *AppServer) handleChineseInLAReadPost(ctx context.Context, args ChineseInLAReadPostArgs) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+
+	result, err := s.chineseInLAService.ReadPost(ctx, chineseinla.ReadPostRequest{
+		CategoryID: args.CategoryID,
+		ForumID:    args.ForumID,
+		TopicID:    args.TopicID,
+		Page:       args.Page,
+		Limit:      args.Limit,
+	})
+	if err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return chineseInLAJSONResult(result)
 }
 
 func (s *AppServer) handleChineseInLAPreparePost(ctx context.Context, args ChineseInLAPreparePostArgs) *MCPToolResult {

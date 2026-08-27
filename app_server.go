@@ -25,6 +25,8 @@ type ChineseInLAService interface {
 	CloseLoginSession()
 	CheckLogin(context.Context) (chineseinla.LoginStatus, error)
 	Forums(context.Context) ([]chineseinla.Forum, error)
+	ListPosts(context.Context, chineseinla.ListPostsRequest) (chineseinla.ListPostsResult, error)
+	ReadPost(context.Context, chineseinla.ReadPostRequest) (chineseinla.ReadPostResult, error)
 	Prepare(context.Context, chineseinla.PrepareRequest) (chineseinla.PrepareResult, error)
 	PublishPrepared(context.Context, string, bool) (chineseinla.PublishResult, error)
 }
