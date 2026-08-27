@@ -12,12 +12,14 @@ import (
 
 var (
 	forumLinkPattern = regexp.MustCompile(`/f/page_pppping/mode_newtopic/f_(\d+)\.html`)
-	groupLinkPattern = regexp.MustCompile(`/f/c_\d+\.html`)
+	groupLinkPattern = regexp.MustCompile(`/f/c_(\d+)(?:/[^?#]*)?\.html(?:[?#].*)?$`)
+	lineBreakPattern = regexp.MustCompile(`(?i)<br\s*/?>`)
 )
 
 type Forum struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
+	GroupID     int    `json:"group_id,omitempty"`
 	Group       string `json:"group,omitempty"`
 	Description string `json:"description,omitempty"`
 	Restricted  bool   `json:"restricted"`
@@ -29,44 +31,116 @@ func ParseForums(reader io.Reader) ([]Forum, error) {
 		return nil, fmt.Errorf("parse forum catalog: %w", err)
 	}
 
-	currentGroup := ""
 	seen := make(map[int]struct{})
 	forums := make([]Forum, 0, 64)
-	var walk func(*html.Node)
-	walk = func(node *html.Node) {
-		if node.Type == html.ElementNode && node.Data == "a" {
+	appendForums := func(root *html.Node, groupID int, group string) {
+		walkLinks(root, func(node *html.Node) {
 			href := attr(node, "href")
+			match := forumLinkPattern.FindStringSubmatch(href)
 			name := strings.TrimSpace(nodeText(node))
-			if name != "" && groupLinkPattern.MatchString(href) {
-				currentGroup = name
+			if len(match) != 2 || name == "" {
+				return
 			}
-			if match := forumLinkPattern.FindStringSubmatch(href); len(match) == 2 && name != "" {
-				id, parseErr := strconv.Atoi(match[1])
-				if parseErr == nil {
-					if _, exists := seen[id]; !exists {
-						description := nearbyDescription(node)
-						forums = append(forums, Forum{
-							ID:          id,
-							Name:        name,
-							Group:       currentGroup,
-							Description: description,
-							Restricted:  currentGroup == "" || looksRestricted(name+" "+description),
-						})
-						seen[id] = struct{}{}
-					}
-				}
+			id, parseErr := strconv.Atoi(match[1])
+			if parseErr != nil {
+				return
 			}
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-		}
+			if _, exists := seen[id]; exists {
+				return
+			}
+			description := nearbyDescription(node)
+			forums = append(forums, Forum{
+				ID:          id,
+				Name:        name,
+				GroupID:     groupID,
+				Group:       group,
+				Description: description,
+				Restricted:  group == "" || looksRestricted(name+" "+description),
+			})
+			seen[id] = struct{}{}
+		})
 	}
-	walk(doc)
+
+	groupContainers := elementsByClass(doc, "forum_group_select")
+	if len(groupContainers) > 0 {
+		for _, container := range groupContainers {
+			groupID, group := forumGroup(container)
+			appendForums(container, groupID, group)
+		}
+	} else {
+		currentGroupID := 0
+		currentGroup := ""
+		walkLinks(doc, func(node *html.Node) {
+			href := attr(node, "href")
+			if match := groupLinkPattern.FindStringSubmatch(href); len(match) == 2 {
+				currentGroupID, _ = strconv.Atoi(match[1])
+				currentGroup = strings.TrimSpace(nodeText(node))
+				return
+			}
+			if forumLinkPattern.MatchString(href) {
+				appendForums(node, currentGroupID, currentGroup)
+			}
+		})
+	}
 
 	if len(forums) == 0 {
 		return nil, fmt.Errorf("no forums found; ChineseInLA may have changed its category page")
 	}
 	return forums, nil
+}
+
+func walkLinks(root *html.Node, visit func(*html.Node)) {
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			visit(node)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func elementsByClass(root *html.Node, className string) []*html.Node {
+	var matches []*html.Node
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && hasClass(node, className) {
+			matches = append(matches, node)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	return matches
+}
+
+func hasClass(node *html.Node, className string) bool {
+	for _, current := range strings.Fields(attr(node, "class")) {
+		if current == className {
+			return true
+		}
+	}
+	return false
+}
+
+func forumGroup(container *html.Node) (int, string) {
+	groupID := 0
+	group := ""
+	walkLinks(container, func(node *html.Node) {
+		if groupID != 0 {
+			return
+		}
+		match := groupLinkPattern.FindStringSubmatch(attr(node, "href"))
+		if len(match) != 2 {
+			return
+		}
+		groupID, _ = strconv.Atoi(match[1])
+		group = strings.TrimSpace(nodeText(node))
+	})
+	return groupID, group
 }
 
 func attr(node *html.Node, name string) string {
@@ -95,26 +169,42 @@ func nodeText(node *html.Node) string {
 }
 
 func nearbyDescription(anchor *html.Node) string {
-	container := anchor.Parent
-	if container == nil {
-		return ""
-	}
-	for current := container; current != nil && current != anchor; current = current.FirstChild {
-		if current.Type == html.ElementNode && current.Data == "img" {
-			if alt := strings.TrimSpace(attr(current, "alt")); alt != "" {
-				return alt
-			}
+	for container, depth := anchor.Parent, 0; container != nil && depth < 4; container, depth = container.Parent, depth+1 {
+		if description := firstImageDescription(container); description != "" {
+			return description
 		}
-	}
-	for sibling := anchor.PrevSibling; sibling != nil; sibling = sibling.PrevSibling {
-		if sibling.Type == html.ElementNode && sibling.Data == "img" {
-			return strings.TrimSpace(attr(sibling, "alt"))
-		}
-		if sibling.Type == html.TextNode && strings.TrimSpace(sibling.Data) != "" {
+		if hasClass(container, "forum_group_select") {
 			break
 		}
 	}
 	return ""
+}
+
+func firstImageDescription(root *html.Node) string {
+	var description string
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if description != "" {
+			return
+		}
+		if node.Type == html.ElementNode && node.Data == "img" {
+			description = normalizeDescription(attr(node, "title"))
+			if description == "" {
+				description = normalizeDescription(attr(node, "alt"))
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	return description
+}
+
+func normalizeDescription(value string) string {
+	value = lineBreakPattern.ReplaceAllString(value, " ")
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func looksRestricted(value string) bool {
