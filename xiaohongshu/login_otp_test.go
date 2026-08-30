@@ -25,9 +25,23 @@ func TestClassifyLoginDOMObservation(t *testing.T) {
 		{
 			name: "authenticated wins",
 			dom: loginDOMObservation{
-				Authenticated: true, CaptchaVisible: true, QRScanned: true, OTPVisible: true,
+				Authenticated: true, CaptchaVisible: true, SecurityQRVisible: true, QRScanned: true, OTPVisible: true,
 			},
 			want: LoginPageAuthenticated,
+		},
+		{
+			name: "account security QR wins over captcha-named SMS modal",
+			dom: loginDOMObservation{
+				SecurityQRVisible: true, QRScanned: true, SMSModalVisible: true,
+			},
+			want: LoginPageCaptchaNeeded,
+		},
+		{
+			name: "account security QR wins over an overlapping OTP input",
+			dom: loginDOMObservation{
+				SecurityQRVisible: true, QRScanned: true, SMSModalVisible: true, OTPVisible: true,
+			},
+			want: LoginPageCaptchaNeeded,
 		},
 		{
 			name: "scanned SMS modal wins over captcha-named CSS",

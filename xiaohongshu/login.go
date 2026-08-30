@@ -54,12 +54,13 @@ type LoginObservation struct {
 // regression-test: Xiaohongshu's SMS modal is named "r-captcha-modal" even
 // though it is an OTP prompt rather than an interactive CAPTCHA challenge.
 type loginDOMObservation struct {
-	Authenticated   bool   `json:"authenticated"`
-	CaptchaVisible  bool   `json:"captchaVisible"`
-	QRScanned       bool   `json:"qrScanned"`
-	SMSModalVisible bool   `json:"smsModalVisible"`
-	OTPVisible      bool   `json:"otpVisible"`
-	Message         string `json:"message,omitempty"`
+	Authenticated     bool   `json:"authenticated"`
+	CaptchaVisible    bool   `json:"captchaVisible"`
+	SecurityQRVisible bool   `json:"securityQRVisible"`
+	QRScanned         bool   `json:"qrScanned"`
+	SMSModalVisible   bool   `json:"smsModalVisible"`
+	OTPVisible        bool   `json:"otpVisible"`
+	Message           string `json:"message,omitempty"`
 }
 
 func NewLogin(page *rod.Page) *LoginAction {
@@ -79,6 +80,11 @@ func classifyLoginDOMObservation(dom loginDOMObservation) LoginObservation {
 	switch {
 	case dom.Authenticated:
 		return LoginObservation{State: LoginPageAuthenticated}
+	case dom.SecurityQRVisible:
+		// Xiaohongshu mounts both SMS verification and account-security QR
+		// challenges inside .r-captcha-modal. The visible security QR is a
+		// distinct second scan step and must win over the generic modal name.
+		return LoginObservation{State: LoginPageCaptchaNeeded, Message: dom.Message}
 	case dom.OTPVisible && dom.QRScanned:
 		return LoginObservation{State: LoginPageOTPRequired, Message: dom.Message}
 	case dom.SMSModalVisible && dom.QRScanned:
@@ -292,6 +298,15 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 		const qrScanned = scannedText || !!scannedMarker || (!!qr && !visible(qr));
 
 		const smsModal = Array.from(document.querySelectorAll(".r-captcha-modal")).find(visible);
+		const securityQR = Array.from(document.querySelectorAll(".r-captcha-modal")).find((el) => {
+			if (!visible(el)) return false;
+			const text = (el.innerText || el.textContent || "").trim();
+			return text.includes("请通过验证") &&
+				(text.includes("保护账号安全") || text.includes("扫码验证身份")) &&
+				Boolean(el.querySelector(
+					"img, canvas, svg, [class*=qrcode], [class*=qr-code], [style*=background-image]"
+				));
+		});
 		const otp = Array.from(document.querySelectorAll(
 			'.r-captcha-modal input[placeholder*="验证码"], ' +
 			'.r-captcha-modal input[autocomplete="one-time-code"], ' +
@@ -316,6 +331,7 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 		return JSON.stringify({
 			authenticated,
 			captchaVisible: !!captcha,
+			securityQRVisible: !!securityQR,
 			qrScanned,
 			smsModalVisible: !!smsModal,
 			otpVisible: !!otp,
