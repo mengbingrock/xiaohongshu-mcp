@@ -208,6 +208,7 @@ func (s *XiaohongshuService) waitScanInBackground(
 		cancel()
 		return nil, fmt.Errorf("create login session: %w", err)
 	}
+	session.captureChallenge = loginAction.CaptureSecurityVerification
 	logrus.Infof("等待扫码登录，会话 #%d，超时 %s", session.seq, timeout)
 
 	go func() {
@@ -259,8 +260,8 @@ func mapLoginPageState(state xiaohongshu.LoginPageState) LoginSessionState {
 }
 
 // GetLoginSessionStatus returns the latest state observed on the retained page.
-func (s *XiaohongshuService) GetLoginSessionStatus(_ context.Context, sessionID string) (*LoginSessionStatus, error) {
-	status, err := s.logins.status(sessionID)
+func (s *XiaohongshuService) GetLoginSessionStatus(ctx context.Context, sessionID string) (*LoginSessionStatus, error) {
+	status, err := s.logins.captureSecurityChallenge(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}

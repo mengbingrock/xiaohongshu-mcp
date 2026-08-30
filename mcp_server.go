@@ -226,10 +226,12 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "get_login_session_status",
-			Description: "查询 get_login_qrcode 创建的小红书登录会话状态",
+			Description: "查询 get_login_qrcode 创建的小红书登录会话状态；账号安全二维码过期时会在同一会话内刷新并返回新图片",
 			Annotations: &mcp.ToolAnnotations{
-				Title:        "Get Login Session Status",
-				ReadOnlyHint: true,
+				Title:           "Get Login Session Status",
+				ReadOnlyHint:    false,
+				DestructiveHint: boolPtr(false),
+				OpenWorldHint:   boolPtr(true),
 			},
 		},
 		withPanicRecovery("get_login_session_status", func(ctx context.Context, req *mcp.CallToolRequest, args LoginSessionArgs) (*mcp.CallToolResult, any, error) {

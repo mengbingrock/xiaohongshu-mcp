@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,7 +115,7 @@ func describeLoginSessionState(state LoginSessionState) string {
 	case LoginSessionOTPSubmitted:
 		return "验证码已提交，等待登录完成"
 	case LoginSessionCaptchaNeeded:
-		return "需要人工完成 CAPTCHA，不能通过验证码工具绕过"
+		return "需要扫描账号安全验证二维码（CAPTCHA required）"
 	case LoginSessionAuthenticated:
 		return "登录成功"
 	case LoginSessionExpired:
@@ -137,12 +138,24 @@ func (s *AppServer) handleGetLoginSessionStatus(ctx context.Context, sessionID s
 		}
 	}
 
+	return loginSessionStatusResult(*status)
+}
+
+func loginSessionStatusResult(status LoginSessionStatus) *MCPToolResult {
 	text := fmt.Sprintf("登录会话状态：%s\n会话 ID: %s\n验证码提交次数: %d/%d",
 		describeLoginSessionState(status.State), status.SessionID, status.Attempts, maxLoginCodeAttempts)
 	if status.LastError != "" {
 		text += "\n页面提示: " + status.LastError
 	}
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: text}}}
+	content := []MCPContent{{Type: "text", Text: text}}
+	if status.State == LoginSessionCaptchaNeeded && len(status.ChallengeImage) > 0 {
+		content = append(content, MCPContent{
+			Type:     "image",
+			MimeType: "image/png",
+			Data:     base64.StdEncoding.EncodeToString(status.ChallengeImage),
+		})
+	}
+	return &MCPToolResult{Content: content}
 }
 
 func (s *AppServer) handleSubmitLoginCode(ctx context.Context, sessionID, code string) *MCPToolResult {

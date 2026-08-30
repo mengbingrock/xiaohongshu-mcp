@@ -333,6 +333,90 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 	return classifyLoginDOMObservation(dom), nil
 }
 
+// CaptureSecurityVerification refreshes an expired account-security QR inside
+// the retained login page and returns only the visible challenge panel. It does
+// not create a new browser or replace the active login session.
+func (a *LoginAction) CaptureSecurityVerification(ctx context.Context) ([]byte, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	pp := a.page.Context(ctx).Timeout(10 * time.Second)
+	refreshed, err := pp.Eval(`() => {
+		const visible = (el) => {
+			if (!el) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" && style.visibility !== "hidden" &&
+				Number(style.opacity || "1") !== 0 && rect.width > 0 && rect.height > 0;
+		};
+		const expired = Array.from(document.querySelectorAll("body *")).find((el) =>
+			visible(el) && el.children.length === 0 && /已过期.*刷新/.test((el.textContent || "").trim())
+		);
+		if (!expired) return false;
+		const target = expired.closest('button, [role="button"]') || expired;
+		target.click();
+		return true;
+	}`)
+	if err != nil {
+		return nil, errors.Wrap(err, "inspect expired security QR")
+	}
+	if refreshed.Value.Bool() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(750 * time.Millisecond):
+		}
+	}
+
+	_, err = pp.Eval(`() => {
+		for (const old of document.querySelectorAll('[data-postiz-security-challenge]')) {
+			old.removeAttribute('data-postiz-security-challenge');
+		}
+		const visible = (el) => {
+			if (!el) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" && style.visibility !== "hidden" &&
+				Number(style.opacity || "1") !== 0 && rect.width >= 180 && rect.height >= 180;
+		};
+		const candidates = Array.from(document.querySelectorAll("body *")).filter((el) => {
+			if (!visible(el)) return false;
+			const text = (el.innerText || el.textContent || "").trim();
+			return text.includes("请通过验证") &&
+				(text.includes("保护账号安全") || text.includes("扫码验证身份")) &&
+				Boolean(el.querySelector("img, canvas, svg, [class*=qrcode], [class*=qr-code], [style*=background-image]"));
+		});
+		candidates.sort((left, right) => {
+			const a = left.getBoundingClientRect();
+			const b = right.getBoundingClientRect();
+			return (a.width * a.height) - (b.width * b.height);
+		});
+		if (!candidates[0]) return false;
+		candidates[0].setAttribute('data-postiz-security-challenge', 'true');
+		return true;
+	}`)
+	if err != nil {
+		return nil, errors.Wrap(err, "locate security QR panel")
+	}
+
+	challenge, err := pp.Element(`[data-postiz-security-challenge="true"]`)
+	if err != nil {
+		return nil, errors.Wrap(err, "security QR panel not found")
+	}
+	defer func() {
+		_, _ = a.page.Timeout(2 * time.Second).Eval(`() => {
+			for (const element of document.querySelectorAll('[data-postiz-security-challenge]')) {
+				element.removeAttribute('data-postiz-security-challenge');
+			}
+		}`)
+	}()
+	image, err := challenge.Screenshot(proto.PageCaptureScreenshotFormatPng, 100)
+	if err != nil {
+		return nil, errors.Wrap(err, "capture security QR panel")
+	}
+	return image, nil
+}
+
 // SubmitVerificationCode fills and submits the OTP on the same page that
 // produced the QR code. It never navigates or creates another browser.
 func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) error {

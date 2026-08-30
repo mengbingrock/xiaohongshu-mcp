@@ -42,37 +42,42 @@ const (
 // LoginSessionStatus 是可以安全返回给 API/MCP 客户端的会话快照。
 // 不包含浏览器、页面、验证码或取消函数。
 type LoginSessionStatus struct {
-	SessionID string            `json:"session_id"`
-	State     LoginSessionState `json:"state"`
-	ExpiresAt time.Time         `json:"expires_at"`
-	Attempts  int               `json:"attempts"`
-	LastError string            `json:"last_error,omitempty"`
+	SessionID      string            `json:"session_id"`
+	State          LoginSessionState `json:"state"`
+	ExpiresAt      time.Time         `json:"expires_at"`
+	Attempts       int               `json:"attempts"`
+	LastError      string            `json:"last_error,omitempty"`
+	ChallengeImage []byte            `json:"-"`
 }
 
 type loginCodeSubmitter func(context.Context, string) error
+type loginChallengeCapture func(context.Context) ([]byte, error)
 
 // loginSession 持有一次二维码登录所对应的浏览器操作。
 // opMu 保证提交验证码、保存 cookies 和关闭浏览器不会同时操作同一页面。
 type loginSession struct {
-	seq       uint64
-	id        string
-	expiresAt time.Time
-	cancel    context.CancelFunc
-	submit    loginCodeSubmitter
-	opMu      sync.Mutex
+	seq              uint64
+	id               string
+	expiresAt        time.Time
+	cancel           context.CancelFunc
+	submit           loginCodeSubmitter
+	captureChallenge loginChallengeCapture
+	opMu             sync.Mutex
 
-	state     LoginSessionState
-	attempts  int
-	lastError string
+	state          LoginSessionState
+	attempts       int
+	lastError      string
+	challengeImage []byte
 }
 
 func (s *loginSession) snapshot() LoginSessionStatus {
 	return LoginSessionStatus{
-		SessionID: s.id,
-		State:     s.state,
-		ExpiresAt: s.expiresAt,
-		Attempts:  s.attempts,
-		LastError: s.lastError,
+		SessionID:      s.id,
+		State:          s.state,
+		ExpiresAt:      s.expiresAt,
+		Attempts:       s.attempts,
+		LastError:      s.lastError,
+		ChallengeImage: append([]byte(nil), s.challengeImage...),
 	}
 }
 
@@ -151,6 +156,9 @@ func (l *loginSessions) observe(session *loginSession, state LoginSessionState, 
 
 	session.state = state
 	session.lastError = sanitizeLoginStatusMessage(lastError)
+	if state != LoginSessionCaptchaNeeded {
+		session.challengeImage = nil
+	}
 }
 
 func sanitizeLoginStatusMessage(message string) string {
@@ -168,6 +176,7 @@ func (l *loginSessions) finish(session *loginSession, state LoginSessionState, l
 	session.submit = nil
 	session.state = state
 	session.lastError = lastError
+	session.challengeImage = nil
 }
 
 func (l *loginSessions) status(sessionID string) (LoginSessionStatus, error) {
@@ -178,6 +187,42 @@ func (l *loginSessions) status(sessionID string) (LoginSessionStatus, error) {
 		return LoginSessionStatus{}, ErrLoginSessionNotFound
 	}
 	return l.current.snapshot(), nil
+}
+
+func (l *loginSessions) captureSecurityChallenge(ctx context.Context, sessionID string) (LoginSessionStatus, error) {
+	l.mu.Lock()
+	if l.current == nil || l.current.id != sessionID {
+		l.mu.Unlock()
+		return LoginSessionStatus{}, ErrLoginSessionNotFound
+	}
+	session := l.current
+	capture := session.captureChallenge
+	shouldCapture := session.cancel != nil && session.state == LoginSessionCaptchaNeeded && capture != nil
+	if !shouldCapture {
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, nil
+	}
+	l.mu.Unlock()
+
+	var image []byte
+	var captureErr error
+	session.withPageOperation(func() {
+		image, captureErr = capture(ctx)
+	})
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.current != session || session.cancel == nil {
+		return session.snapshot(), ErrLoginSessionClosed
+	}
+	if captureErr != nil {
+		session.lastError = sanitizeLoginStatusMessage(captureErr.Error())
+	} else if len(image) > 0 {
+		session.challengeImage = append(session.challengeImage[:0], image...)
+		session.lastError = ""
+	}
+	return session.snapshot(), nil
 }
 
 func (l *loginSessions) submitCode(ctx context.Context, sessionID, code string) (LoginSessionStatus, error) {
