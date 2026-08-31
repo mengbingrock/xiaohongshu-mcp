@@ -1077,7 +1077,7 @@ ChineseInLA 每个服务实例同时只保留一个登录会话和一个待发�
 ### 微信群
 |                                                 微信群 25 群                                        |                                                 微信群 26 群                                         |
 | :------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------: |
-| <img src="https://github.com/user-attachments/assets/1c3fdb95-ccb5-43ff-99e7-642f6dbe1214" alt="WechatIMG119" width="300"> | <img src="https://github.com/user-attachments/assets/cf19e0c8-f26e-4ce0-ad6d-7e7a7fe698a3" alt="WechatIMG119" width="300"> |
+| <img src="https://github.com/user-attachments/assets/203ef328-d49f-42bb-b651-de827c78f4a5" alt="WechatIMG119" width="300"> | <img src="https://github.com/user-attachments/assets/e9d732c9-6bab-4717-9c49-b01f1e06dd48" alt="WechatIMG119" width="300"> |
 
 ### 飞书群
 
