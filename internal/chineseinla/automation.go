@@ -346,7 +346,10 @@ func (a *Automation) publish(ctx context.Context, expectedDraftID string, confir
 	if err != nil {
 		return PublishResult{}, fmt.Errorf("find ChineseInLA publish control: %w", err)
 	}
-	if err := submit.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	// The site's cookie banner can overlap the submit anchor in headless mode.
+	// Dispatch the anchor's native DOM click so the existing beforePost()
+	// validation still runs without waiting for pointer hit-testing to succeed.
+	if _, err := submit.Eval(`() => this.click()`); err != nil {
 		return PublishResult{}, fmt.Errorf("click ChineseInLA publish control: %w", err)
 	}
 
