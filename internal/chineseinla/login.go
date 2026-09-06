@@ -28,6 +28,7 @@ var (
 	ErrLoginSessionNotFound  = errors.New("ChineseInLA login session not found")
 	ErrLoginSessionExpired   = errors.New("ChineseInLA login session expired")
 	ErrLoginAttemptsExceeded = errors.New("ChineseInLA login attempt limit reached")
+	ErrEgressUnavailable     = errors.New("ChineseInLA local egress proxy unavailable")
 )
 
 type LoginSessionState string
@@ -181,6 +182,11 @@ func (a *Automation) waitForLoginFormIfNeeded(page *rod.Page) error {
 		return nil
 	}
 	readyPage := page.Timeout(a.loginOperationTimeout())
+	if failure, err := chineseInLABrowserNetworkFailure(readyPage); err != nil {
+		return err
+	} else if failure != "" {
+		return fmt.Errorf("%w: %s", ErrEgressUnavailable, failure)
+	}
 	for _, selector := range []string{
 		`input[name="username"]`,
 		`input[name="password"]`,
@@ -194,6 +200,49 @@ func (a *Automation) waitForLoginFormIfNeeded(page *rod.Page) error {
 	// A short stabilization window prevents returning a mostly blank screenshot.
 	time.Sleep(300 * time.Millisecond)
 	return nil
+}
+
+func chineseInLABrowserNetworkFailure(page *rod.Page) (string, error) {
+	result, err := page.Eval(`() => {
+		const body = String(document.body?.innerText || "").slice(0, 4000);
+		const marker = document.querySelector("#main-frame-error, .neterror") ? "network-error-page" : "";
+		return [document.documentURI, document.title, marker, body].join("\n");
+	}`)
+	if err != nil {
+		return "", fmt.Errorf("inspect ChineseInLA browser network state: %w", err)
+	}
+	return chineseInLANetworkFailureMessage(result.Value.Str()), nil
+}
+
+func chineseInLANetworkFailureMessage(snapshot string) string {
+	upper := strings.ToUpper(snapshot)
+	tests := []struct {
+		token   string
+		message string
+	}{
+		{
+			token:   "ERR_TUNNEL_CONNECTION_FAILED",
+			message: "the configured local proxy tunnel is not available; start or renew the Postiz egress lease and retry",
+		},
+		{
+			token:   "ERR_PROXY_CONNECTION_FAILED",
+			message: "the configured local proxy could not be reached; reconnect the local Postiz MCP connector and retry",
+		},
+		{
+			token:   "ERR_CONNECTION_CLOSED",
+			message: "the local egress connection closed before ChineseInLA loaded; reconnect the connector and retry",
+		},
+	}
+	for _, test := range tests {
+		if strings.Contains(upper, test.token) {
+			return test.message
+		}
+	}
+	if strings.Contains(strings.ToLower(snapshot), "chrome-error://chromewebdata") ||
+		strings.Contains(snapshot, "network-error-page") {
+		return "Chrome loaded a network error page instead of ChineseInLA; verify the local Postiz egress connector and retry"
+	}
+	return ""
 }
 
 func (a *Automation) GetLoginSession(_ context.Context, sessionID string) (LoginSessionStatus, error) {

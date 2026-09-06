@@ -16,6 +16,7 @@ type PreparedState struct {
 	FormURL      string    `json:"form_url"`
 	TargetID     string    `json:"target_id,omitempty"`
 	Title        string    `json:"title"`
+	ImageCount   int       `json:"image_count,omitempty"`
 	Headless     bool      `json:"headless,omitempty"`
 	PreviewImage string    `json:"preview_image,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`

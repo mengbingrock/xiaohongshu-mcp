@@ -113,3 +113,43 @@ func TestCloseLoginSessionCancelsRetainedPageContext(t *testing.T) {
 		t.Fatal("retained login session was not cleared")
 	}
 }
+
+func TestChineseInLANetworkFailureMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot string
+		want     string
+	}{
+		{
+			name:     "tunnel",
+			snapshot: "This site can’t be reached\nERR_TUNNEL_CONNECTION_FAILED",
+			want:     "proxy tunnel",
+		},
+		{
+			name:     "proxy",
+			snapshot: "ERR_PROXY_CONNECTION_FAILED",
+			want:     "proxy could not be reached",
+		},
+		{
+			name:     "generic Chrome page",
+			snapshot: "chrome-error://chromewebdata/\nnetwork-error-page",
+			want:     "network error page",
+		},
+		{
+			name:     "normal login",
+			snapshot: "https://www.chineseinla.com/f/page_login.html\n洛杉矶华人资讯网",
+			want:     "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := chineseInLANetworkFailureMessage(test.snapshot)
+			if test.want == "" && got != "" {
+				t.Fatalf("chineseInLANetworkFailureMessage() = %q, want no error", got)
+			}
+			if test.want != "" && !strings.Contains(got, test.want) {
+				t.Fatalf("chineseInLANetworkFailureMessage() = %q, want substring %q", got, test.want)
+			}
+		})
+	}
+}

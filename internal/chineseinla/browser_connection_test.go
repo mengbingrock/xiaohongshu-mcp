@@ -99,3 +99,56 @@ func TestNoSandboxIsRestrictedToLinuxHeadless(t *testing.T) {
 		}
 	}
 }
+
+func TestBrowserArgumentsMatchConfiguredProxy(t *testing.T) {
+	profile := t.TempDir()
+	arguments := []string{
+		"chromium",
+		"--user-data-dir=" + profile,
+		"--proxy-server=http://127.0.0.1:18443",
+	}
+
+	matches, err := browserArgumentsMatchConfiguration(
+		arguments,
+		profile,
+		"http://127.0.0.1:18443/",
+	)
+	if err != nil {
+		t.Fatalf("browserArgumentsMatchConfiguration: %v", err)
+	}
+	if !matches {
+		t.Fatal("matching ChineseInLA browser proxy was rejected")
+	}
+}
+
+func TestBrowserArgumentsRejectBrowserWithoutConfiguredProxy(t *testing.T) {
+	profile := t.TempDir()
+	matches, err := browserArgumentsMatchConfiguration(
+		[]string{"chromium", "--user-data-dir", profile},
+		profile,
+		"http://127.0.0.1:18443",
+	)
+	if err != nil {
+		t.Fatalf("browserArgumentsMatchConfiguration: %v", err)
+	}
+	if matches {
+		t.Fatal("ChineseInLA browser without its configured proxy was accepted")
+	}
+}
+
+func TestBrowserArgumentsRejectDifferentProfileWithoutClosingIt(t *testing.T) {
+	configuredProfile := t.TempDir()
+	otherProfile := t.TempDir()
+	_, err := browserArgumentsMatchConfiguration(
+		[]string{
+			"chromium",
+			"--user-data-dir=" + otherProfile,
+			"--proxy-server=http://127.0.0.1:18443",
+		},
+		configuredProfile,
+		"http://127.0.0.1:18443",
+	)
+	if err == nil {
+		t.Fatal("browser using a different profile was accepted")
+	}
+}

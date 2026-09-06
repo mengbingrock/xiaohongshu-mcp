@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -243,6 +244,7 @@ func (a *Automation) Prepare(ctx context.Context, request PrepareRequest) (Prepa
 		FormURL:      formURL,
 		TargetID:     string(pageInfo.TargetID),
 		Title:        request.Title,
+		ImageCount:   len(images.Paths),
 		Headless:     a.Config.Headless,
 		PreviewImage: previewImage,
 		CreatedAt:    time.Now().UTC(),
@@ -319,7 +321,13 @@ func (a *Automation) publish(ctx context.Context, expectedDraftID string, confir
 	if err != nil {
 		return PublishResult{}, err
 	}
+	if err := detectSiteRejection(page); err != nil {
+		return PublishResult{}, err
+	}
 	if err := detectHumanVerification(page); err != nil {
+		return PublishResult{}, err
+	}
+	if err := prepareImageSubmission(page, state.ImageCount); err != nil {
 		return PublishResult{}, err
 	}
 	preparedTitle := state.Title
@@ -357,6 +365,10 @@ func (a *Automation) publish(ctx context.Context, expectedDraftID string, confir
 	nextPublishedTopicCheck := time.Time{}
 	var publishedTopicCheckErr error
 	for time.Now().Before(deadline) {
+		if rejectionErr := detectSiteRejection(page); rejectionErr != nil {
+			restoreAlert(page)
+			return PublishResult{}, rejectionErr
+		}
 		info, infoErr := page.Info()
 		if infoErr == nil && info != nil && isChineseInLAURL(info.URL, "/f/page_viewtopic") {
 			if err := a.persistCookies(browser); err != nil {
@@ -506,10 +518,27 @@ func (a *Automation) connect(ctx context.Context) (*rod.Browser, error) {
 	if controlURL, err := runningBrowserControlURL(ctx, a.Config.CDPPort); err == nil {
 		browser, connectErr := connectRodBrowser(ctx, controlURL)
 		if connectErr == nil {
-			if restoreErr := a.restoreCookiesOnce(browser, controlURL); restoreErr != nil {
-				return nil, restoreErr
+			matches, configurationErr := browserMatchesLaunchConfiguration(
+				browser,
+				a.Config.ProfileDir,
+				a.Config.Proxy,
+			)
+			if configurationErr != nil {
+				return nil, configurationErr
 			}
-			return browser, nil
+			if matches {
+				if restoreErr := a.restoreCookiesOnce(browser, controlURL); restoreErr != nil {
+					return nil, restoreErr
+				}
+				return browser, nil
+			}
+			// A browser started before CHINESEINLA_PROXY was configured would
+			// otherwise silently send the operation through the server's public
+			// IP. Replace only the browser using this integration's isolated
+			// profile, then launch it below with the configured proxy flag.
+			if closeErr := closeBrowserAndWait(ctx, browser, a.Config.CDPPort); closeErr != nil {
+				return nil, closeErr
+			}
 		}
 	}
 	if err := ensureDirectory(a.Config.ProfileDir); err != nil {
@@ -530,6 +559,9 @@ func (a *Automation) connect(ctx context.Context) (*rod.Browser, error) {
 		Headless(a.Config.Headless).
 		Leakless(false).
 		RemoteDebuggingPort(a.Config.CDPPort)
+	if a.Config.Proxy != "" {
+		browserLauncher.Proxy(a.Config.Proxy)
+	}
 	// Ubuntu cloud hosts commonly disable unprivileged user namespaces, which
 	// leaves Chromium without a usable sandbox. Restrict this exception to the
 	// unprivileged Linux headless process; CDP remains bound to loopback.
@@ -548,6 +580,80 @@ func (a *Automation) connect(ctx context.Context) (*rod.Browser, error) {
 		return nil, err
 	}
 	return browser, nil
+}
+
+func browserMatchesLaunchConfiguration(browser *rod.Browser, profileDir, proxy string) (bool, error) {
+	commandLine, err := proto.BrowserGetBrowserCommandLine{}.Call(browser)
+	if err != nil {
+		return false, fmt.Errorf("verify the running ChineseInLA browser proxy: %w", err)
+	}
+	return browserArgumentsMatchConfiguration(commandLine.Arguments, profileDir, proxy)
+}
+
+func browserArgumentsMatchConfiguration(arguments []string, profileDir, proxy string) (bool, error) {
+	expectedProfile, err := filepath.Abs(profileDir)
+	if err != nil {
+		return false, fmt.Errorf("resolve the configured ChineseInLA browser profile: %w", err)
+	}
+	actualProfile, ok := commandLineFlagValue(arguments, "user-data-dir")
+	if !ok {
+		return false, errors.New("the ChineseInLA CDP port is occupied by a browser whose profile cannot be verified")
+	}
+	actualProfile, err = filepath.Abs(actualProfile)
+	if err != nil {
+		return false, fmt.Errorf("resolve the running ChineseInLA browser profile: %w", err)
+	}
+	if filepath.Clean(actualProfile) != filepath.Clean(expectedProfile) {
+		return false, fmt.Errorf("the ChineseInLA CDP port is occupied by a different browser profile: %s", actualProfile)
+	}
+
+	actualProxy, _ := commandLineFlagValue(arguments, "proxy-server")
+	return normalizeProxyURL(actualProxy) == normalizeProxyURL(proxy), nil
+}
+
+func commandLineFlagValue(arguments []string, name string) (string, bool) {
+	prefix := "--" + name + "="
+	standalone := "--" + name
+	for index, argument := range arguments {
+		if strings.HasPrefix(argument, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(argument, prefix)), true
+		}
+		if argument == standalone && index+1 < len(arguments) {
+			return strings.TrimSpace(arguments[index+1]), true
+		}
+	}
+	return "", false
+}
+
+func normalizeProxyURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimSuffix(raw, "/")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	return parsed.String()
+}
+
+func closeBrowserAndWait(ctx context.Context, browser *rod.Browser, port int) error {
+	closeErr := browser.Close()
+	deadline := time.Now().Add(browserConnectTimeout)
+	for time.Now().Before(deadline) {
+		if _, err := runningBrowserControlURL(ctx, port); err != nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if closeErr != nil {
+		return fmt.Errorf("restart the ChineseInLA browser with its configured proxy: %w", closeErr)
+	}
+	return errors.New("restart the ChineseInLA browser with its configured proxy: browser did not exit")
 }
 
 func linuxHeadlessNeedsNoSandbox(goos string, headless bool) bool {
@@ -616,8 +722,10 @@ func openPage(browser *rod.Browser, targetURL string, timeout time.Duration) (*r
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", targetURL, err)
 	}
-	page = page.Timeout(timeout)
-	if err := page.WaitLoad(); err != nil {
+	// Keep the timeout scoped to navigation. Returning the timed page makes the
+	// deadline apply to the entire lifetime of the tab, so a later image upload
+	// or user review can fail even though that individual operation is healthy.
+	if err := page.Timeout(timeout).WaitLoad(); err != nil {
 		return nil, fmt.Errorf("wait for %s: %w", targetURL, err)
 	}
 	return page, nil
@@ -660,6 +768,36 @@ func detectHumanVerification(page *rod.Page) error {
 	return nil
 }
 
+func detectSiteRejection(page *rod.Page) error {
+	result, err := page.Eval(`() => document.body ? document.body.innerText : ""`)
+	if err != nil {
+		// Navigation can briefly destroy the JavaScript execution context. The
+		// publish loop will inspect the replacement document on its next pass.
+		return nil
+	}
+	return chineseInLASiteRejection(result.Value.Str())
+}
+
+func chineseInLASiteRejection(pageText string) error {
+	upper := strings.ToUpper(strings.Join(strings.Fields(pageText), " "))
+	const marker = "YOUR ISP IS NOT ALLOWED"
+	if !strings.Contains(upper, marker) {
+		return nil
+	}
+
+	message := "ChineseInLA blocked this server's network provider during submission (YOUR ISP IS NOT ALLOWED)"
+	if index := strings.Index(upper, "YOUR IP IS "); index >= 0 {
+		fields := strings.Fields(upper[index+len("YOUR IP IS "):])
+		if len(fields) > 0 {
+			ip := strings.Trim(fields[0], ".,;:()[]{}")
+			if parsed := net.ParseIP(ip); parsed != nil {
+				message += "; rejected egress IP: " + parsed.String()
+			}
+		}
+	}
+	return errors.New(message + ". Configure CHINESEINLA_PROXY with an allowed egress and restart the ChineseInLA browser before preparing another post")
+}
+
 func findForum(forums []Forum, id int) (Forum, bool) {
 	for _, forum := range forums {
 		if forum.ID == id {
@@ -674,12 +812,14 @@ func findPreparedPage(browser *rod.Browser, state PreparedState) (*rod.Page, err
 	if err != nil {
 		return nil, fmt.Errorf("list browser tabs: %w", err)
 	}
-	forumMarker := fmt.Sprintf("/mode_newtopic/f_%d.html", state.ForumID)
 	if state.TargetID != "" {
 		for _, page := range pages {
 			info, infoErr := page.Info()
 			if infoErr == nil && info != nil && string(info.TargetID) == state.TargetID {
-				if !isChineseInLAURL(info.URL, forumMarker) {
+				if rejectionErr := detectSiteRejection(page); rejectionErr != nil {
+					return nil, rejectionErr
+				}
+				if !isChineseInLAFormURL(info.URL, state.ForumID) {
 					return nil, errors.New("the prepared browser tab has navigated away from the ChineseInLA form; run prepare again")
 				}
 				return page, nil
@@ -692,11 +832,24 @@ func findPreparedPage(browser *rod.Browser, state PreparedState) (*rod.Page, err
 		if infoErr != nil || info == nil {
 			continue
 		}
-		if info.URL == state.FormURL || isChineseInLAURL(info.URL, forumMarker) {
+		if info.URL == state.FormURL || isChineseInLAFormURL(info.URL, state.ForumID) {
 			return page, nil
 		}
 	}
 	return nil, errors.New("the prepared ChineseInLA form tab is no longer open; run prepare again")
+}
+
+func isChineseInLAFormURL(raw string, forumID int) bool {
+	markers := []string{
+		fmt.Sprintf("/f/page_pppping/mode_newtopic/f_%d.html", forumID),
+		fmt.Sprintf("/f/page_pppping/f_%d/mode_newtopic.html", forumID),
+	}
+	for _, marker := range markers {
+		if isChineseInLAURL(raw, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isChineseInLAURL(raw, pathMarker string) bool {
@@ -802,6 +955,10 @@ func firstElement(page *rod.Page, selectors []string) (*rod.Element, error) {
 }
 
 func uploadImages(page *rod.Page, paths []string, timeout time.Duration) error {
+	existingImages, err := insertedImageCount(page)
+	if err != nil {
+		return fmt.Errorf("count existing ChineseInLA images: %w", err)
+	}
 	button, err := page.Timeout(timeout).Element(`input[type="button"][value="上传图片"]`)
 	if err != nil {
 		return fmt.Errorf("find upload-image button: %w", err)
@@ -819,64 +976,113 @@ func uploadImages(page *rod.Page, paths []string, timeout time.Duration) error {
 	}
 
 	// The F5 UEditor uploader has existed in both auto-upload and explicit-start variants.
-	// Click an explicit start control when present, then wait for an enabled insert/confirm control.
+	// Click an explicit start control when present. Its confirm control is enabled even while
+	// the upload is in progress, so wait for both the completed thumbnails and inactive mask
+	// before clicking it; otherwise the dialog closes and its late callback never inserts the
+	// image into #uploadBox.
 	_, _ = clickControlByText(page, []string{"开始上传"}, 5*time.Second)
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := detectHumanVerification(page); err != nil {
-			return err
+		ready, readyErr := imageUploadReady(page, len(paths))
+		if readyErr != nil {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		if !ready {
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
 		clicked, clickErr := clickControlByText(page, []string{"确定", "确认", "插入"}, 1500*time.Millisecond)
 		if clickErr == nil && clicked {
 			for time.Now().Before(deadline) {
-				hasInput, input, hasErr := page.Has(`input.edui-f5image-file`)
-				if hasErr == nil && !hasInput {
+				insertedImages, countErr := insertedImageCount(page)
+				if countErr == nil && insertedImages >= existingImages+len(paths) {
 					return nil
-				}
-				if hasErr == nil && input != nil {
-					visible, visibleErr := input.Visible()
-					if visibleErr == nil && !visible {
-						return nil
-					}
 				}
 				time.Sleep(300 * time.Millisecond)
 			}
+			return errors.New("ChineseInLA closed the image dialog without inserting every uploaded image into the post")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	return errors.New("image upload did not finish within 90 seconds; inspect the visible uploader and run prepare again")
 }
 
-func clickControlByText(page *rod.Page, names []string, timeout time.Duration) (bool, error) {
-	controls, err := page.Timeout(timeout).Elements(`button, a, input[type="button"]`)
+func imageUploadReady(page *rod.Page, expected int) (bool, error) {
+	result, err := page.Timeout(2*time.Second).Eval(`(expected) => {
+		const controls = Array.from(document.querySelectorAll('.edui-btn-primary')).filter((control) => {
+			const rect = control.getBoundingClientRect();
+			return String(control.innerText || control.textContent || '').trim() === '确认' && rect.width > 0 && rect.height > 0;
+		});
+		return controls.some((control) => {
+			const dialog = control.closest('.edui-modal') || document;
+			const mask = dialog.querySelector('.edui-f5image-mask, .edui-image-mask');
+			const completed = dialog.querySelectorAll('.edui-f5image-upload-item, .edui-image-upload-item').length;
+			return completed >= expected && (!mask || !mask.classList.contains('edui-active'));
+		});
+	}`, expected)
 	if err != nil {
 		return false, err
 	}
-	for _, control := range controls {
-		text, textErr := control.Text()
-		if textErr != nil {
-			continue
-		}
-		if value, valueErr := control.Attribute("value"); valueErr == nil && value != nil && strings.TrimSpace(text) == "" {
-			text = *value
-		}
-		text = strings.TrimSpace(text)
-		for _, name := range names {
-			if text != name {
-				continue
-			}
-			visible, visibleErr := control.Visible()
-			if visibleErr != nil || !visible {
-				continue
-			}
-			if err := control.WaitEnabled(); err != nil {
-				continue
-			}
-			if err := control.Click(proto.InputMouseButtonLeft, 1); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
+	return result.Value.Bool(), nil
+}
+
+func insertedImageCount(page *rod.Page) (int, error) {
+	result, err := page.Timeout(2 * time.Second).Eval(`() => {
+		const uploaded = document.querySelectorAll('#uploadBox img.postingImg').length;
+		const editor = document.querySelector('div#editor[contenteditable="true"], #editor [contenteditable="true"], div[contenteditable="true"]');
+		return uploaded + (editor ? editor.querySelectorAll('img').length : 0);
+	}`)
+	if err != nil {
+		return 0, err
 	}
-	return false, nil
+	return result.Value.Int(), nil
+}
+
+func prepareImageSubmission(page *rod.Page, expected int) error {
+	if expected <= 0 {
+		return nil
+	}
+	result, err := page.Timeout(3*time.Second).Eval(`(expected) => {
+		const images = Array.from(document.querySelectorAll('#uploadBox .uploaded_img img'));
+		const input = document.querySelector('#uploaded_img_input');
+		if (!input || images.length < expected) {
+			return { count: images.length, valueLength: 0 };
+		}
+		const html = images.map((image, index) => {
+			image.removeAttribute('style');
+			image.setAttribute('index', String(index + 1));
+			return image.outerHTML;
+		}).join('');
+		input.value = html;
+		return { count: images.length, valueLength: input.value.length };
+	}`, expected)
+	if err != nil {
+		return fmt.Errorf("prepare ChineseInLA image submission metadata: %w", err)
+	}
+	data := result.Value.Map()
+	count := data["count"].Int()
+	valueLength := data["valueLength"].Int()
+	if count < expected || valueLength == 0 {
+		return fmt.Errorf("prepared ChineseInLA draft expected %d image(s), but only %d image(s) were ready for submission", expected, count)
+	}
+	return nil
+}
+
+func clickControlByText(page *rod.Page, names []string, timeout time.Duration) (bool, error) {
+	result, err := page.Timeout(timeout).Eval(`(names) => {
+		const controls = Array.from(document.querySelectorAll('button, a, input[type="button"], [role="button"], .edui-btn'));
+		const control = controls.find((candidate) => {
+			const text = String(candidate.innerText || candidate.textContent || candidate.value || '').trim();
+			const rect = candidate.getBoundingClientRect();
+			return names.includes(text) && !candidate.disabled && rect.width > 0 && rect.height > 0;
+		});
+		if (!control) return false;
+		control.click();
+		return true;
+	}`, names)
+	if err != nil {
+		return false, err
+	}
+	return result.Value.Bool(), nil
 }

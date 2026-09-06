@@ -21,6 +21,26 @@ func TestDefaultConfigHeadlessEnv(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigProxyEnv(t *testing.T) {
+	t.Setenv("CHINESEINLA_PROXY", "socks5://127.0.0.1:1080")
+
+	config, err := DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	if config.Proxy != "socks5://127.0.0.1:1080" {
+		t.Fatalf("proxy = %q", config.Proxy)
+	}
+}
+
+func TestDefaultConfigRejectsInvalidProxyEnv(t *testing.T) {
+	t.Setenv("CHINESEINLA_PROXY", "file:///tmp/not-a-proxy")
+
+	if _, err := DefaultConfig(); err == nil {
+		t.Fatal("DefaultConfig accepted an invalid CHINESEINLA_PROXY value")
+	}
+}
+
 func TestDefaultConfigRejectsInvalidHeadlessEnv(t *testing.T) {
 	t.Setenv("CHINESEINLA_HEADLESS", "sometimes")
 
@@ -129,5 +149,37 @@ func TestIsChineseInLAURL(t *testing.T) {
 		if got := isChineseInLAURL(test.raw, marker); got != test.want {
 			t.Errorf("isChineseInLAURL(%q) = %t, want %t", test.raw, got, test.want)
 		}
+	}
+}
+
+func TestIsChineseInLAFormURLAcceptsBothPathOrders(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		"https://www.chineseinla.com/f/page_pppping/mode_newtopic/f_23.html",
+		"https://www.chineseinla.com/f/page_pppping/f_23/mode_newtopic.html",
+	}
+	for _, raw := range tests {
+		if !isChineseInLAFormURL(raw, 23) {
+			t.Errorf("isChineseInLAFormURL(%q) = false, want true", raw)
+		}
+	}
+	if isChineseInLAFormURL("https://www.chineseinla.com/f/page_pppping/f_22/mode_newtopic.html", 23) {
+		t.Fatal("isChineseInLAFormURL accepted a different forum")
+	}
+}
+
+func TestChineseInLASiteRejectionReportsBlockedEgress(t *testing.T) {
+	t.Parallel()
+
+	err := chineseInLASiteRejection("普通错误\nYOUR ISP IS NOT ALLOWED. YOUR IP IS 3.144.175.137")
+	if err == nil {
+		t.Fatal("expected ISP rejection to be detected")
+	}
+	if message := err.Error(); !strings.Contains(message, "3.144.175.137") || !strings.Contains(message, "CHINESEINLA_PROXY") {
+		t.Fatalf("unexpected rejection message: %s", message)
+	}
+	if err := chineseInLASiteRejection("正常页面"); err != nil {
+		t.Fatalf("normal page reported as rejected: %v", err)
 	}
 }

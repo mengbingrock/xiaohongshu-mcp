@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,7 @@ type Config struct {
 	StatePath   string
 	PreviewPath string
 	BrowserBin  string
+	Proxy       string
 	Headless    bool
 	Timeout     time.Duration
 }
@@ -116,6 +118,14 @@ func DefaultConfig() (Config, error) {
 		}
 		headless = parsed
 	}
+	proxy := strings.TrimSpace(os.Getenv("CHINESEINLA_PROXY"))
+	if proxy != "" {
+		parsed, parseErr := url.Parse(proxy)
+		if parseErr != nil || parsed.Hostname() == "" ||
+			!slices.Contains([]string{"http", "https", "socks5"}, strings.ToLower(parsed.Scheme)) {
+			return Config{}, fmt.Errorf("CHINESEINLA_PROXY must be an http, https, or socks5 proxy URL")
+		}
+	}
 
 	return Config{
 		CDPPort:     port,
@@ -124,6 +134,7 @@ func DefaultConfig() (Config, error) {
 		StatePath:   statePath,
 		PreviewPath: previewPath,
 		BrowserBin:  strings.TrimSpace(os.Getenv("CHINESEINLA_BROWSER_BIN")),
+		Proxy:       proxy,
 		Headless:    headless,
 		Timeout:     30 * time.Second,
 	}, nil

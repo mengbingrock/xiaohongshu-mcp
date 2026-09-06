@@ -17,6 +17,7 @@ func TestStateStoreRoundTrip(t *testing.T) {
 		FormURL:      BaseURL + "/f/page_pppping/mode_newtopic/f_21.html",
 		TargetID:     "target-123",
 		Title:        "洛杉矶招聘信息",
+		ImageCount:   1,
 		Headless:     true,
 		PreviewImage: filepath.Join(t.TempDir(), "preview.png"),
 		CreatedAt:    time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
