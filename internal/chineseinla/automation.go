@@ -902,12 +902,24 @@ func fillPostForm(page *rod.Page, request PrepareRequest, imagePaths []string, t
 		`div#editor[contenteditable="true"]`,
 		`#editor [contenteditable="true"]`,
 		`div[contenteditable="true"]`,
+		`textarea#Text`,
+		`textarea[name="message"]`,
 	})
 	if err != nil {
 		return fmt.Errorf("find body editor: %w", err)
 	}
-	if err := replaceContentEditableText(body, request.FinalBody()); err != nil {
-		return fmt.Errorf("fill body: %w", err)
+	bodyTag, err := body.Eval(`() => this.tagName.toLowerCase()`)
+	if err != nil {
+		return fmt.Errorf("inspect body editor: %w", err)
+	}
+	var fillBodyErr error
+	if bodyTag.Value.Str() == "textarea" {
+		fillBodyErr = replaceTextAreaText(body, request.FinalBody())
+	} else {
+		fillBodyErr = replaceContentEditableText(body, request.FinalBody())
+	}
+	if fillBodyErr != nil {
+		return fmt.Errorf("fill body: %w", fillBodyErr)
 	}
 
 	typeSelector := fmt.Sprintf(`input[name="is_question"][value="%s"]`, request.PostType.FormValue())
@@ -942,6 +954,20 @@ func replaceElementText(element *rod.Element, value string) error {
 		return err
 	}
 	return element.Input(value)
+}
+
+func replaceTextAreaText(element *rod.Element, value string) error {
+	_, err := element.Eval(`(value) => {
+		const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+		if (descriptor && descriptor.set) {
+			descriptor.set.call(this, value);
+		} else {
+			this.value = value;
+		}
+		this.dispatchEvent(new Event('input', { bubbles: true }));
+		this.dispatchEvent(new Event('change', { bubbles: true }));
+	}`, value)
+	return err
 }
 
 func replaceContentEditableText(element *rod.Element, value string) error {
