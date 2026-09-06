@@ -30,7 +30,8 @@ type PublishImageContent struct {
 }
 
 type PublishAction struct {
-	page *rod.Page
+	page  *rod.Page
+	trace *publishTrace
 }
 
 const (
@@ -41,12 +42,14 @@ const (
 )
 
 func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
-
+	trace := newPublishTrace("image")
 	pp := page.Timeout(300 * time.Second)
 
 	if err := pp.Navigate(urlOfPublic); err != nil {
+		trace.Capture(pp, "navigation_failed")
 		return nil, errors.Wrap(err, "导航到发布页面失败")
 	}
+	trace.Capture(pp, "publish_page_navigated")
 
 	time.Sleep(2 * time.Second)
 
@@ -54,28 +57,37 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	// keeps both signals pending while telemetry and anti-bot nodes mutate.
 	// mustClickPublishTab waits for the concrete, usable upload container.
 	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
+		trace.Capture(pp, "image_tab_failed")
 		logrus.Errorf("点击上传图文 TAB 失败: %v", err)
 		return nil, err
 	}
+	trace.Capture(pp, "image_tab_ready")
 
 	time.Sleep(1 * time.Second)
 
 	return &PublishAction{
-		page: pp,
+		page:  pp,
+		trace: trace,
 	}, nil
 }
 
-func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent) error {
+func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent) (err error) {
 	if len(content.ImagePaths) == 0 {
 		return errors.New("图片不能为空")
 	}
 
 	// 重设超时：.Context(ctx) 会替换掉 NewPublishImageAction 里 Timeout(300s) 的 deadline
 	page := p.page.Context(ctx).Timeout(300 * time.Second)
+	defer func() {
+		if err != nil {
+			p.trace.Capture(page, "publish_failed")
+		}
+	}()
 
 	if err := uploadImages(page, content.ImagePaths); err != nil {
 		return errors.Wrap(err, "小红书上传图片失败")
 	}
+	p.trace.Capture(page, "images_uploaded")
 
 	tags := content.Tags
 	if len(tags) >= 10 {
@@ -85,9 +97,10 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 
 	logrus.Infof("发布内容: title=%s, images=%v, tags=%v, schedule=%v, original=%v, visibility=%s, products=%v", content.Title, len(content.ImagePaths), tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products)
 
-	if err := submitPublish(ctx, page, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products); err != nil {
+	if err := submitPublish(ctx, page, p.trace, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products); err != nil {
 		return errors.Wrap(err, "小红书发布失败")
 	}
+	p.trace.Capture(page, "publish_completed")
 
 	return nil
 }
@@ -406,7 +419,7 @@ func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 	return errors.Errorf("第%d张图片上传超时(60s)，请检查网络连接和图片大小", expectedCount)
 }
 
-func submitPublish(ctx context.Context, page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
+func submitPublish(ctx context.Context, page *rod.Page, trace *publishTrace, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
 	titleElem, err := page.Element("div.d-input input")
 	if err != nil {
 		return errors.Wrap(err, "查找标题输入框失败")
@@ -414,6 +427,7 @@ func submitPublish(ctx context.Context, page *rod.Page, title, content string, t
 	if err := humanize.Type(ctx, titleElem, title); err != nil {
 		return errors.Wrap(err, "输入标题失败")
 	}
+	trace.Capture(page, "title_filled")
 
 	humanize.Delay(ctx, humanize.AfterType)
 	if err := checkTitleMaxLength(page); err != nil {
@@ -430,12 +444,14 @@ func submitPublish(ctx context.Context, page *rod.Page, title, content string, t
 	if err := humanize.Type(ctx, contentElem, content); err != nil {
 		return errors.Wrap(err, "输入正文失败")
 	}
+	trace.Capture(page, "content_filled")
 	if err := waitAndClickTitleInput(titleElem); err != nil {
 		return err
 	}
 	if err := inputTags(ctx, contentElem, tags); err != nil {
 		return err
 	}
+	trace.Capture(page, "tags_filled")
 
 	humanize.Delay(ctx, humanize.AfterType)
 
@@ -449,11 +465,13 @@ func submitPublish(ctx context.Context, page *rod.Page, title, content string, t
 			return errors.Wrap(err, "设置定时发布失败")
 		}
 		slog.Info("定时发布设置完成", "schedule_time", scheduleTime.Format("2006-01-02 15:04"))
+		trace.Capture(page, "schedule_set")
 	}
 
 	if err := setVisibility(page, visibility); err != nil {
 		return errors.Wrap(err, "设置可见范围失败")
 	}
+	trace.Capture(page, "visibility_set")
 
 	// 处理原创声明：显式请求了原创但设置失败 → 报错中止，不静默发成非原创（避免"以为原创其实不是"）
 	if isOriginal {
@@ -461,19 +479,27 @@ func submitPublish(ctx context.Context, page *rod.Page, title, content string, t
 			return errors.Wrap(err, "设置原创声明失败（已请求原创，中止发布）")
 		}
 		slog.Info("已声明原创")
+		trace.Capture(page, "original_set")
 	}
 
 	if err := bindProducts(ctx, page, products); err != nil {
 		return errors.Wrap(err, "绑定商品失败")
 	}
+	trace.Capture(page, "products_processed")
 
+	trace.Capture(page, "before_publish_click")
 	if err := clickPublishButton(page); err != nil {
 		return err
 	}
+	trace.Capture(page, "publish_clicked")
 
 	// 校验发布真的成功：成功后创作平台会跳转离开发布页；未跳转则判定失败，
 	// 消除"点了发布按钮就算成功"的假阳性。
-	return waitPublishSuccess(page, 15*time.Second)
+	if err := waitPublishSuccess(page, 15*time.Second); err != nil {
+		return err
+	}
+	trace.Capture(page, "publish_success_confirmed")
+	return nil
 }
 
 // waitPublishSuccess 轮询等待发布成功的信号：小红书发布成功后会跳转离开发布表单页

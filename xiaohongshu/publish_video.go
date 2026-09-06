@@ -25,11 +25,14 @@ type PublishVideoContent struct {
 
 // NewPublishVideoAction 进入发布页并切换到"上传视频"
 func NewPublishVideoAction(page *rod.Page) (*PublishAction, error) {
+	trace := newPublishTrace("video")
 	pp := page.Timeout(300 * time.Second)
 
 	if err := pp.Navigate(urlOfPublic); err != nil {
+		trace.Capture(pp, "navigation_failed")
 		return nil, errors.Wrap(err, "导航到发布页面失败")
 	}
+	trace.Capture(pp, "publish_page_navigated")
 
 	// 使用 WaitLoad 代替 WaitIdle（更宽松）
 	if err := pp.WaitLoad(); err != nil {
@@ -43,30 +46,39 @@ func NewPublishVideoAction(page *rod.Page) (*PublishAction, error) {
 	time.Sleep(1 * time.Second)
 
 	if err := mustClickPublishTab(pp, "上传视频"); err != nil {
+		trace.Capture(pp, "video_tab_failed")
 		return nil, errors.Wrap(err, "切换到上传视频失败")
 	}
+	trace.Capture(pp, "video_tab_ready")
 
 	time.Sleep(1 * time.Second)
 
-	return &PublishAction{page: pp}, nil
+	return &PublishAction{page: pp, trace: trace}, nil
 }
 
 // PublishVideo 上传视频并提交
-func (p *PublishAction) PublishVideo(ctx context.Context, content PublishVideoContent) error {
+func (p *PublishAction) PublishVideo(ctx context.Context, content PublishVideoContent) (err error) {
 	if content.VideoPath == "" {
 		return errors.New("视频不能为空")
 	}
 
 	// 重设超时：.Context(ctx) 会替换掉 NewPublishVideoAction 里 Timeout(300s) 的 deadline
 	page := p.page.Context(ctx).Timeout(300 * time.Second)
+	defer func() {
+		if err != nil {
+			p.trace.Capture(page, "publish_failed")
+		}
+	}()
 
 	if err := uploadVideo(page, content.VideoPath); err != nil {
 		return errors.Wrap(err, "小红书上传视频失败")
 	}
+	p.trace.Capture(page, "video_uploaded")
 
-	if err := submitPublishVideo(ctx, page, content.Title, content.Content, content.Tags, content.ScheduleTime, content.Visibility, content.Products); err != nil {
+	if err := submitPublishVideo(ctx, page, p.trace, content.Title, content.Content, content.Tags, content.ScheduleTime, content.Visibility, content.Products); err != nil {
 		return errors.Wrap(err, "小红书发布失败")
 	}
+	p.trace.Capture(page, "publish_completed")
 	return nil
 }
 
@@ -101,7 +113,7 @@ func uploadVideo(page *rod.Page, videoPath string) error {
 }
 
 // submitPublishVideo 填写标题、正文、标签并点击发布（等待按钮可点击后再提交）
-func submitPublishVideo(ctx context.Context, page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, visibility string, products []string) error {
+func submitPublishVideo(ctx context.Context, page *rod.Page, trace *publishTrace, title, content string, tags []string, scheduleTime *time.Time, visibility string, products []string) error {
 	// 标题
 	titleElem, err := page.Element("div.d-input input")
 	if err != nil {
@@ -110,6 +122,7 @@ func submitPublishVideo(ctx context.Context, page *rod.Page, title, content stri
 	if err := humanize.Type(ctx, titleElem, title); err != nil {
 		return errors.Wrap(err, "输入标题失败")
 	}
+	trace.Capture(page, "title_filled")
 	humanize.Delay(ctx, humanize.AfterType)
 
 	// 正文 + 标签
@@ -120,12 +133,14 @@ func submitPublishVideo(ctx context.Context, page *rod.Page, title, content stri
 	if err := humanize.Type(ctx, contentElem, content); err != nil {
 		return errors.Wrap(err, "输入正文失败")
 	}
+	trace.Capture(page, "content_filled")
 	if err := waitAndClickTitleInput(titleElem); err != nil {
 		return err
 	}
 	if err := inputTags(ctx, contentElem, tags); err != nil {
 		return err
 	}
+	trace.Capture(page, "tags_filled")
 
 	humanize.Delay(ctx, humanize.AfterType)
 
@@ -135,22 +150,31 @@ func submitPublishVideo(ctx context.Context, page *rod.Page, title, content stri
 			return errors.Wrap(err, "设置定时发布失败")
 		}
 		slog.Info("定时发布设置完成", "schedule_time", scheduleTime.Format("2006-01-02 15:04"))
+		trace.Capture(page, "schedule_set")
 	}
 
 	// 设置可见范围
 	if err := setVisibility(page, visibility); err != nil {
 		return errors.Wrap(err, "设置可见范围失败")
 	}
+	trace.Capture(page, "visibility_set")
 
 	// 绑定商品
 	if err := bindProducts(ctx, page, products); err != nil {
 		return errors.Wrap(err, "绑定商品失败")
 	}
+	trace.Capture(page, "products_processed")
 
+	trace.Capture(page, "before_publish_click")
 	if err := clickPublishButton(page); err != nil {
 		return err
 	}
+	trace.Capture(page, "publish_clicked")
 
 	// 校验发布真的成功（成功跳转离开发布页），未跳转判失败——消除假成功
-	return waitPublishSuccess(page, 15*time.Second)
+	if err := waitPublishSuccess(page, 15*time.Second); err != nil {
+		return err
+	}
+	trace.Capture(page, "publish_success_confirmed")
+	return nil
 }
