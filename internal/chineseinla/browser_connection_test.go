@@ -152,3 +152,25 @@ func TestBrowserArgumentsRejectDifferentProfileWithoutClosingIt(t *testing.T) {
 		t.Fatal("browser using a different profile was accepted")
 	}
 }
+
+func TestSetProxyAcceptsOnlyTenantLoopbackEndpoint(t *testing.T) {
+	automation := NewAutomation(Config{})
+	if err := automation.SetProxy(" http://127.0.0.1:32123 "); err != nil {
+		t.Fatalf("SetProxy: %v", err)
+	}
+	if automation.Config.Proxy != "http://127.0.0.1:32123" {
+		t.Fatalf("proxy = %q", automation.Config.Proxy)
+	}
+
+	for _, invalid := range []string{
+		"https://127.0.0.1:32123",
+		"http://localhost:32123",
+		"http://10.0.0.1:32123",
+		"http://127.0.0.1:80",
+		"http://127.0.0.1:32123/path",
+	} {
+		if err := automation.SetProxy(invalid); err == nil {
+			t.Errorf("SetProxy(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}

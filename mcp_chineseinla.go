@@ -26,6 +26,10 @@ type ChineseInLAPreparePostArgs struct {
 	ConfirmPreparation bool     `json:"confirm_preparation" jsonschema:"Must be true after the user explicitly confirms the exact forum, post type, title, body, tags, and media may be filled into ChineseInLA"`
 }
 
+type ChineseInLASetProxyArgs struct {
+	ProxyURL string `json:"proxy_url" jsonschema:"Tenant-specific loopback HTTP proxy URL returned by the authenticated Postiz egress lease"`
+}
+
 type ChineseInLAPublishPostArgs struct {
 	DraftID        string `json:"draft_id" jsonschema:"Exact draft_id returned by chineseinla_prepare_post"`
 	ConfirmPublish bool   `json:"confirm_publish" jsonschema:"Must be true only after the user reviews the visible form or returned headless preview and explicitly confirms publication"`
@@ -57,6 +61,17 @@ type ChineseInLAReadPostArgs struct {
 }
 
 func registerChineseInLATools(server *mcp.Server, appServer *AppServer) {
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "chineseinla_set_proxy",
+			Description: "Set the tenant-specific loopback egress proxy before opening the ChineseInLA browser. Postiz calls this automatically after acquiring the organization's local lease.",
+			Annotations: &mcp.ToolAnnotations{Title: "Configure ChineseInLA Egress"},
+		},
+		withPanicRecovery("chineseinla_set_proxy", func(_ context.Context, _ *mcp.CallToolRequest, args ChineseInLASetProxyArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleChineseInLASetProxy(args)), nil, nil
+		}),
+	)
+
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "chineseinla_open_login",
@@ -157,6 +172,22 @@ func registerChineseInLATools(server *mcp.Server, appServer *AppServer) {
 			return convertToMCPResult(appServer.handleChineseInLAPublishPost(ctx, args)), nil, nil
 		}),
 	)
+}
+
+func (s *AppServer) handleChineseInLASetProxy(args ChineseInLASetProxyArgs) *MCPToolResult {
+	if unavailable := s.chineseInLAUnavailable(); unavailable != nil {
+		return unavailable
+	}
+	configurator, ok := s.chineseInLAService.(interface{ SetProxy(string) error })
+	if !ok {
+		return chineseInLARefusal("ChineseInLA runtime proxy configuration is unavailable.")
+	}
+	s.chineseInLAMu.Lock()
+	defer s.chineseInLAMu.Unlock()
+	if err := configurator.SetProxy(strings.TrimSpace(args.ProxyURL)); err != nil {
+		return chineseInLAErrorResult(err)
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: `{"status":"configured"}`}}}
 }
 
 func (s *AppServer) handleChineseInLAOpenLogin(ctx context.Context) *MCPToolResult {

@@ -78,6 +78,22 @@ func NewAutomation(config Config) *Automation {
 	}
 }
 
+// SetProxy updates the tenant-specific Postiz relay endpoint before any
+// ChineseInLA browser operation. Only a loopback HTTP proxy is accepted so an
+// MCP caller cannot turn the browser into an arbitrary network proxy client.
+func (a *Automation) SetProxy(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || strings.ToLower(parsed.Scheme) != "http" || parsed.Hostname() != "127.0.0.1" {
+		return errors.New("ChineseInLA runtime proxy must be an HTTP URL on 127.0.0.1")
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1024 || port > 65535 || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("ChineseInLA runtime proxy must contain only a valid loopback host and unprivileged port")
+	}
+	a.Config.Proxy = fmt.Sprintf("http://127.0.0.1:%d", port)
+	return nil
+}
+
 func (a *Automation) Login(ctx context.Context) (LoginStatus, error) {
 	browser, err := a.connect(ctx)
 	if err != nil {
