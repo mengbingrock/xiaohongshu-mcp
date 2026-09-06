@@ -48,16 +48,11 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 		return nil, errors.Wrap(err, "导航到发布页面失败")
 	}
 
-	if err := pp.WaitLoad(); err != nil {
-		logrus.Warnf("等待页面加载出现问题: %v，继续尝试", err)
-	}
 	time.Sleep(2 * time.Second)
 
-	if err := pp.WaitDOMStable(time.Second, 0.1); err != nil {
-		logrus.Warnf("等待 DOM 稳定出现问题: %v，继续尝试", err)
-	}
-	time.Sleep(1 * time.Second)
-
+	// Do not wait for page load or global DOM stability here. The creator SPA
+	// keeps both signals pending while telemetry and anti-bot nodes mutate.
+	// mustClickPublishTab waits for the concrete, usable upload container.
 	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
 		logrus.Errorf("点击上传图文 TAB 失败: %v", err)
 		return nil, err
@@ -164,19 +159,29 @@ func mustClickPublishTab(page *rod.Page, tabname string) error {
 
 		if blocked {
 			blockedAtLeastOnce = true
-			logrus.Info("发布 TAB 被遮挡，尝试关闭浮层")
+			logrus.Info("发布 TAB 被透明目标覆盖，使用坐标点击")
+		}
+
+		// Do not call Element.WaitInteractable here. Xiaohongshu injects a
+		// nearly transparent pointer target over each real tab; waiting for the
+		// underlying element can consume the page's full five-minute timeout.
+		// A mouse click at the real element's center reaches that target and is
+		// the same action a user performs.
+		if err := clickElementCenter(page, tab); err != nil {
+			logrus.Warnf("点击发布 TAB 中心失败: %v", err)
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		if waitForPublishTabActive(page, tabname, 2*time.Second) {
+			return nil
+		}
+
+		if blocked {
+			logrus.Info("发布 TAB 坐标点击未切换，尝试关闭浮层")
 			dismissPopCover(page)
-			time.Sleep(200 * time.Millisecond)
-			continue
 		}
-
-		if err := humanize.Click(tab); err != nil {
-			logrus.Warnf("点击发布 TAB 失败: %v", err)
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-
-		return nil
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	// 区分两种失败：找不到 TAB，和找到了但浮层一直关不掉
@@ -184,6 +189,66 @@ func mustClickPublishTab(page *rod.Page, tabname string) error {
 		return errors.Errorf("发布 TAB %s 一直被浮层遮挡，Esc 与点击空白都未能关闭", tabname)
 	}
 	return errors.Errorf("没有找到发布 TAB - %s", tabname)
+}
+
+func clickElementCenter(page *rod.Page, elem *rod.Element) error {
+	shape, err := elem.Shape()
+	if err != nil {
+		return err
+	}
+	if len(shape.Quads) == 0 {
+		return errors.New("发布 TAB 没有可点击区域")
+	}
+
+	quad := shape.Quads[0]
+	return humanize.ClickAt(page, proto.Point{
+		X: (quad[0] + quad[4]) / 2,
+		Y: (quad[1] + quad[5]) / 2,
+	})
+}
+
+func waitForPublishTabActive(page *rod.Page, tabname string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		tab, blocked, err := getTabElement(page, tabname)
+		if err == nil && tab != nil && !blocked {
+			className, classErr := tab.Attribute("class")
+			if classErr == nil && className != nil && hasExactClass(*className, "active") && publishPanelMatchesTab(page, tabname) {
+				return true
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
+func publishPanelMatchesTab(page *rod.Page, tabname string) bool {
+	inputs, err := page.Elements(`input[type="file"]`)
+	if err != nil {
+		return false
+	}
+
+	for _, input := range inputs {
+		accept, err := input.Attribute("accept")
+		if err != nil || accept == nil {
+			continue
+		}
+		if tabAcceptMatches(tabname, *accept) {
+			return true
+		}
+	}
+	return false
+}
+
+func tabAcceptMatches(tabname, accept string) bool {
+	switch tabname {
+	case "上传图文":
+		return acceptsImage(accept)
+	case "上传视频":
+		return !acceptsImage(accept) && strings.Contains(strings.ToLower(accept), ".mp4")
+	default:
+		return true
+	}
 }
 
 func getTabElement(page *rod.Page, tabname string) (*rod.Element, bool, error) {
@@ -999,29 +1064,39 @@ func setOriginal(page *rod.Page) error {
 		}
 
 		// 检查开关是否已打开
-		checked, err := switchElem.Eval(`() => {
-			const input = this.querySelector('input[type="checkbox"]');
-			return input ? input.checked : false;
-		}`)
+		checked, err := originalSwitchChecked(switchElem)
 		if err != nil {
 			continue
 		}
 
-		if checked.Value.Bool() {
+		if checked {
 			slog.Info("原创声明已开启")
 			return nil
 		}
 
 		// 点击开关
-		if err := humanize.Click(switchElem); err != nil {
+		if err := clickElementCenter(page, switchElem); err != nil {
 			return errors.Wrap(err, "点击原创声明开关失败")
 		}
 
 		time.Sleep(500 * time.Millisecond)
 
-		// 处理原创声明确认弹窗
-		if err := confirmOriginalDeclaration(page); err != nil {
+		// 处理原创声明确认弹窗。部分账号/新版创作页会直接打开开关，
+		// 不再显示二次确认弹窗；这种情况下以开关的最终状态为准。
+		dialogShown, err := confirmOriginalDeclaration(page)
+		if err != nil {
 			return errors.Wrap(err, "确认原创声明失败")
+		}
+
+		checked, err = waitOriginalSwitchChecked(switchElem, 2*time.Second)
+		if err != nil {
+			return errors.Wrap(err, "确认原创声明开关状态失败")
+		}
+		if err := validateOriginalEnabled(dialogShown, checked); err != nil {
+			return err
+		}
+		if !dialogShown {
+			slog.Info("原创声明已开启，当前页面无需二次确认弹窗")
 		}
 
 		slog.Info("已开启原创声明")
@@ -1033,7 +1108,7 @@ func setOriginal(page *rod.Page) error {
 
 // confirmOriginalDeclaration 交互（勾选须知、点声明按钮）走 go-rod 点击；
 // 仅用只读 Eval 读取 checkbox 勾选态（不产生交互，无法用属性判断的自定义组件才用）。
-func confirmOriginalDeclaration(page *rod.Page) error {
+func confirmOriginalDeclaration(page *rod.Page) (bool, error) {
 	time.Sleep(800 * time.Millisecond) // 技术等待：等确认弹窗渲染
 
 	if footer, err := findFooterByText(page, "原创声明须知"); err != nil {
@@ -1046,12 +1121,15 @@ func confirmOriginalDeclaration(page *rod.Page) error {
 
 	footer, err := findFooterByText(page, "声明原创")
 	if err != nil {
-		return errors.Wrap(err, "未找到声明原创弹窗")
+		if errors.Is(err, errDialogFooterNotFound) {
+			return false, nil
+		}
+		return false, errors.Wrap(err, "查找声明原创弹窗失败")
 	}
 
 	btn, err := footer.Element("button.custom-button")
 	if err != nil {
-		return errors.Wrap(err, "未找到声明原创按钮")
+		return true, errors.Wrap(err, "未找到声明原创按钮")
 	}
 
 	if isButtonDisabled(btn) {
@@ -1061,17 +1139,19 @@ func confirmOriginalDeclaration(page *rod.Page) error {
 		}
 		time.Sleep(300 * time.Millisecond)
 		if isButtonDisabled(btn) {
-			return errors.New("声明原创按钮仍处于禁用状态")
+			return true, errors.New("声明原创按钮仍处于禁用状态")
 		}
 	}
 
-	if err := humanize.Click(btn); err != nil {
-		return errors.Wrap(err, "点击声明原创按钮失败")
+	if err := clickElementCenter(page, btn); err != nil {
+		return true, errors.Wrap(err, "点击声明原创按钮失败")
 	}
 	slog.Info("已成功点击声明原创按钮")
 	time.Sleep(300 * time.Millisecond)
-	return nil
+	return true, nil
 }
+
+var errDialogFooterNotFound = errors.New("未找到匹配的弹窗 footer")
 
 func findFooterByText(page *rod.Page, keyword string) (*rod.Element, error) {
 	footers, err := page.Elements("div.footer")
@@ -1087,7 +1167,58 @@ func findFooterByText(page *rod.Page, keyword string) (*rod.Element, error) {
 			return footer, nil
 		}
 	}
-	return nil, errors.Errorf("未找到包含%q的弹窗 footer", keyword)
+	return nil, errors.Wrapf(errDialogFooterNotFound, "未找到包含%q的弹窗 footer", keyword)
+}
+
+func originalSwitchChecked(switchElem *rod.Element) (bool, error) {
+	checked, err := switchElem.Eval(`() => {
+		const input = this.querySelector('input[type="checkbox"]');
+		const className = String(this.className || '').toLowerCase();
+		const checkedDescendant = Array.from(this.querySelectorAll('[class]')).some((element) =>
+			String(element.className || '').toLowerCase().includes('checked')
+		);
+		return Boolean(
+			(input && (input.checked || input.hasAttribute('checked') || input.getAttribute('aria-checked') === 'true')) ||
+			this.getAttribute('aria-checked') === 'true' ||
+			this.getAttribute('data-checked') === 'true' ||
+			className.includes('checked') ||
+			this.classList.contains('checked') ||
+			this.classList.contains('active') ||
+			this.classList.contains('is-checked') ||
+			checkedDescendant
+		);
+	}`)
+	if err != nil {
+		return false, err
+	}
+	return checked.Value.Bool(), nil
+}
+
+func waitOriginalSwitchChecked(switchElem *rod.Element, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		checked, err := originalSwitchChecked(switchElem)
+		if err != nil {
+			return false, err
+		}
+		if checked {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func validateOriginalEnabled(dialogShown, switchChecked bool) error {
+	if switchChecked {
+		return nil
+	}
+	if !dialogShown {
+		return errors.New("未显示原创声明确认弹窗，且原创声明开关未开启")
+	}
+	return errors.New("确认原创声明后，原创声明开关仍未开启")
 }
 
 // checkFooterCheckbox 勾选 footer 内的自定义 checkbox（未勾选时才点）。
@@ -1109,7 +1240,7 @@ func checkFooterCheckbox(footer *rod.Element) error {
 		return nil
 	}
 
-	return humanize.Click(cb)
+	return clickElementCenter(cb.Page(), cb)
 }
 
 func isButtonDisabled(btn *rod.Element) bool {
