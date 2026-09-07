@@ -241,7 +241,7 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx).Timeout(30 * time.Second)
 	trace := newPublishTrace("login-check")
 	trace.AttachNetwork(pp)
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+	pp.MustNavigate(CurrentSite().HomeURL).MustWaitLoad()
 
 	time.Sleep(1 * time.Second)
 
@@ -274,7 +274,7 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 // creator session has started redirecting to /login with redirectReason=401.
 func (a *LoginAction) CheckCreatorLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx).Timeout(15 * time.Second)
-	if err := pp.Navigate(urlOfPublic); err != nil {
+	if err := pp.Navigate(CurrentSite().PublishURL); err != nil {
 		return false, errors.Wrap(err, "navigate to creator publish page failed")
 	}
 
@@ -335,7 +335,7 @@ func (a *LoginAction) Login(ctx context.Context) error {
 	pp := a.page.Context(ctx)
 
 	// 导航到小红书首页，这会触发二维码弹窗
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+	pp.MustNavigate(CurrentSite().HomeURL).MustWaitLoad()
 
 	time.Sleep(2 * time.Second)
 
@@ -352,7 +352,7 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	pp := a.page.Context(ctx)
 
 	// 导航到小红书首页，这会触发二维码弹窗
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+	pp.MustNavigate(CurrentSite().HomeURL).MustWaitLoad()
 
 	time.Sleep(2 * time.Second)
 

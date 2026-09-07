@@ -57,8 +57,6 @@ func (e creatorSessionExpiredError) Is(target error) bool {
 }
 
 const (
-	urlOfPublic = `https://creator.xiaohongshu.com/publish/publish?source=official`
-
 	// titleElemTimeout 查找新版或旧版标题输入框的轮询窗口
 	titleElemTimeout = 15 * time.Second
 
@@ -71,7 +69,7 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	pp := page.Timeout(300 * time.Second)
 	trace.AttachNetwork(pp)
 
-	if err := pp.Navigate(urlOfPublic); err != nil {
+	if err := pp.Navigate(CurrentSite().PublishURL); err != nil {
 		trace.Capture(pp, "navigation_failed")
 		return nil, errors.Wrap(err, "导航到发布页面失败")
 	}
@@ -211,14 +209,19 @@ func checkCreatorSession(page *rod.Page) error {
 	return creatorPageBlankError{URL: info.URL}
 }
 
+// creatorSessionExpiredURL matches a bounce to either creator login (CN or
+// INTL) so a redirect is recognised as expiry regardless of the active site.
 func creatorSessionExpiredURL(rawURL string) bool {
 	lowerURL := strings.ToLower(rawURL)
 	return strings.Contains(lowerURL, "creator.xiaohongshu.com/login") ||
+		strings.Contains(lowerURL, "creator.rednote.com/login") ||
 		strings.Contains(lowerURL, "redirectreason=401")
 }
 
 func onCreatorPublishPage(rawURL string) bool {
-	return strings.Contains(strings.ToLower(rawURL), "creator.xiaohongshu.com/publish/publish")
+	l := strings.ToLower(rawURL)
+	return strings.Contains(l, "creator.xiaohongshu.com/publish/publish") ||
+		strings.Contains(l, "creator.rednote.com/publish/publish")
 }
 
 // creatorPageIsAuthenticated reports whether the publish page is showing any
