@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+
+	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 )
 
 // Site holds everything that differs between Xiaohongshu's domestic property
@@ -87,6 +89,35 @@ func ResolveSiteFromCookies(data []byte) Site {
 		if c.Name == "id_token" && strings.Contains(c.Domain, "rednote.com") {
 			return SiteINTL
 		}
+	}
+	return SiteCN
+}
+
+// ResolveSite decides the active site for a session file, in priority order:
+// an explicit env override (XHS_SITE), the site stamped at the last login,
+// then a classification of the saved cookies, then CN. Mirrors the seed
+// resolution so a deployment pinned by env is never overridden by the file.
+func ResolveSite(envKey string, store cookies.Cookier) Site {
+	if envKey == SiteCN.Key || envKey == SiteINTL.Key {
+		return SiteByKey(envKey)
+	}
+	if store == nil {
+		return SiteCN
+	}
+	if key := store.LoadSite(); key != "" {
+		return SiteByKey(key)
+	}
+	if data, err := store.LoadCookies(); err == nil {
+		return ResolveSiteFromCookies(data)
+	}
+	return SiteCN
+}
+
+// SiteForFacts classifies where a login just landed from the browser's
+// cookies: an international session carries an id_token on rednote.com.
+func SiteForFacts(f SessionFacts) Site {
+	if f.RednoteIDToken {
+		return SiteINTL
 	}
 	return SiteCN
 }

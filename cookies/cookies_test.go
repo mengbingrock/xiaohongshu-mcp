@@ -216,3 +216,25 @@ func TestDeleteCookies_KeepsSeed(t *testing.T) {
 	assert.NoError(t, c.DeleteCookies())
 	assert.NoError(t, c.DeleteCookies())
 }
+
+func TestSiteRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.json")
+	c := NewLoadCookie(path)
+
+	assert.Equal(t, "", c.LoadSite())
+	assert.NoError(t, c.SaveSeed(7))
+	assert.NoError(t, c.SaveSite("intl"))
+	assert.Equal(t, "intl", c.LoadSite())
+	assert.Equal(t, 7, c.LoadSeed())
+
+	// 保存 cookies / 登出 都不能丢站点和 seed
+	assert.NoError(t, c.SaveCookies([]byte(`[{"name":"id_token","domain":".rednote.com"}]`)))
+	assert.Equal(t, "intl", c.LoadSite())
+	assert.NoError(t, c.DeleteCookies())
+	assert.Equal(t, "intl", c.LoadSite())
+	assert.Equal(t, 7, c.LoadSeed())
+
+	// 换站点
+	assert.NoError(t, c.SaveSite("cn"))
+	assert.Equal(t, "cn", c.LoadSite())
+}

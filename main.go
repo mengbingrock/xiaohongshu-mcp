@@ -9,6 +9,7 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/internal/chineseinla"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
 // version 构建版本号，发布时通过 -ldflags "-X main.version=vX.Y.Z" 注入。
@@ -55,9 +56,13 @@ func main() {
 	configs.InitHeadless(headless)
 	// 入口层解析出 seed 和代理，经 configs 透传给浏览器工厂。
 	// seed 取值：环境变量 > 会话文件 > 新生成并写回，保证同一账号每次启动一致。
-	configs.SetFingerprintSeed(configs.ResolveFingerprintSeed(
-		cookies.NewLoadCookie(cookies.GetCookiesFilePath())))
+	sessionStore := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+	configs.SetFingerprintSeed(configs.ResolveFingerprintSeed(sessionStore))
 	configs.SetProxy(configs.ProxyFromEnv())
+	// 站点：环境变量 XHS_SITE > 上次登录写入的 site > 按 cookies 判定 > 国内版。
+	site := xiaohongshu.ResolveSite(configs.SiteKeyFromEnv(), sessionStore)
+	xiaohongshu.SetSite(site)
+	logrus.Infof("site resolved: %s (home=%s)", site.Key, site.HomeURL)
 
 	// 初始化服务
 	xiaohongshuService := NewXiaohongshuService()

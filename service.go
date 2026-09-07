@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -115,6 +114,10 @@ func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 
 // CheckLoginStatus 检查登录状态
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
+	// A reconnect may have been performed by another process on this profile;
+	// pick up the site it stamped before choosing where to look.
+	xiaohongshu.SetSite(xiaohongshu.ResolveSite(configs.SiteKeyFromEnv(),
+		cookies.NewLoadCookie(cookies.GetCookiesFilePath())))
 	b := newBrowser()
 	defer b.Close()
 
@@ -125,10 +128,7 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	isLoggedIn, err := loginAction.CheckLoginStatus(ctx)
 	if err != nil {
-		if hint := rednoteRoutingHint(); hint != "" {
-			return nil, fmt.Errorf("%w；%s", err, hint)
-		}
-		return nil, err
+		return nil, fmt.Errorf("%w（site=%s）", err, xiaohongshu.CurrentSite().Key)
 	}
 
 	response := &LoginStatusResponse{
@@ -206,51 +206,6 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	return response, nil
 }
 
-// rednoteRoutedMessage explains an international-routing login in the words
-// the operator needs: which account attribute caused it and that the fix is
-// on the Xiaohongshu side (scan with a CN-held account), not another reconnect.
-func rednoteRoutedMessage(holderCountry string) string {
-	where := ""
-	if holderCountry != "" {
-		where = fmt.Sprintf("（账号持有人国家/地区 = %s）", holderCountry)
-	}
-	return "扫码成功，但小红书将该账号路由到了国际版 rednote.com" + where +
-		"：国际版会话无法登录 www/creator.xiaohongshu.com，因此无法发布。请改用国内版账号扫码，或在小红书 App 中确认该账号的地区设置。"
-}
-
-// rednoteRoutingHint inspects the saved cookie file for an international-only
-// session so a failed login check names the real cause.
-func rednoteRoutingHint() string {
-	data, err := cookies.NewLoadCookie(cookies.GetCookiesFilePath()).LoadCookies()
-	if err != nil {
-		return ""
-	}
-	var cks []struct {
-		Name   string `json:"name"`
-		Value  string `json:"value"`
-		Domain string `json:"domain"`
-	}
-	if json.Unmarshal(data, &cks) != nil {
-		return ""
-	}
-	idToken, holder := false, ""
-	for _, c := range cks {
-		if !strings.Contains(c.Domain, "rednote.com") {
-			continue
-		}
-		switch c.Name {
-		case "id_token":
-			idToken = true
-		case "x-rednote-holderctry":
-			holder = c.Value
-		}
-	}
-	if !idToken {
-		return ""
-	}
-	return rednoteRoutedMessage(holder)
-}
-
 const loginSessionNotReusableMessage = "扫码成功，但保存的会话在新浏览器中未被小红书接受（可能触发了账号风控）。请稍后再试，或先在手机 App 中确认设备安全提示。"
 
 // savedSessionReusable opens a fresh browser from the cookie file, exactly as
@@ -321,15 +276,18 @@ func (s *XiaohongshuService) waitScanInBackground(
 				return
 			}
 
-			// Xiaohongshu moved this account to the international brand after the
-			// scan. The rednote.com session cannot sign in to www/creator
-			// .xiaohongshu.com, so no amount of reconnecting will help; say so.
-			if post.RoutedToRednote() && post.XHSWebSession == pre.XHSWebSession {
-				msg := rednoteRoutedMessage(post.HolderCountry)
-				s.logins.finish(session, LoginSessionFailed, msg)
-				logrus.Errorf("扫码后被路由到 rednote.com，会话 #%d: %s", session.seq, post)
-				return
+			// Where did the login land? Xiaohongshu moves overseas-held accounts
+			// to rednote.com after the scan. Stamp the site on the session file
+			// and switch the process to it so the reuse check below, and every
+			// later publish, use the right hosts. Re-derived on every login, so a
+			// CN account reconnecting on an INTL profile flips back cleanly.
+			site := xiaohongshu.SiteForFacts(post)
+			if err := cookies.NewLoadCookie(cookies.GetCookiesFilePath()).SaveSite(site.Key); err != nil {
+				logrus.Warnf("保存站点失败: %v", err)
 			}
+			xiaohongshu.SetSite(site)
+			logrus.Infof("登录站点判定: 会话 #%d site=%s holderctry=%q datactry=%q",
+				session.seq, site.Key, post.HolderCountry, post.DataCountry)
 
 			// The scan only proves the login browser is signed in. Postiz's next
 			// step opens a fresh browser from the saved file, so do that here and

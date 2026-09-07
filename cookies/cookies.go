@@ -15,6 +15,7 @@ import (
 type sessionFile struct {
 	Version int             `json:"version"`
 	Seed    int             `json:"seed,omitempty"`
+	Site    string          `json:"site,omitempty"` // "cn" | "intl"：上次登录落在哪个站点
 	SavedAt string          `json:"saved_at,omitempty"`
 	Cookies json.RawMessage `json:"cookies"`
 }
@@ -30,6 +31,10 @@ type Cookier interface {
 	LoadSeed() int
 	// SaveSeed 写入 seed，保留文件中已有的 cookies。
 	SaveSeed(seed int) error
+	// LoadSite 读取上次登录所在站点（"cn"/"intl"）；未设或文件损坏返回 ""。
+	LoadSite() string
+	// SaveSite 写入站点，保留文件中已有的 cookies 和 seed。
+	SaveSite(site string) error
 }
 
 type localCookie struct {
@@ -92,7 +97,29 @@ func (c *localCookie) LoadSeed() int {
 
 // SaveCookies 保存 cookies 到文件中，保留文件里已有的 seed。
 func (c *localCookie) SaveCookies(data []byte) error {
-	return c.write(data, c.LoadSeed())
+	return c.write(data, c.LoadSeed(), c.LoadSite())
+}
+
+// LoadSite 读取会话所属站点。老格式或未设返回 ""。
+func (c *localCookie) LoadSite() string {
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		return ""
+	}
+	var f sessionFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return ""
+	}
+	return f.Site
+}
+
+// SaveSite 写入站点，保留文件里已有的 cookies 和 seed。
+func (c *localCookie) SaveSite(site string) error {
+	cks, err := c.LoadCookies()
+	if err != nil {
+		cks = nil
+	}
+	return c.write(cks, c.LoadSeed(), site)
 }
 
 // SaveSeed 写入 seed，保留文件里已有的 cookies。
@@ -101,11 +128,11 @@ func (c *localCookie) SaveSeed(seed int) error {
 	if err != nil {
 		cks = nil // 文件还不存在：先把 seed 落下来，cookies 之后再补
 	}
-	return c.write(cks, seed)
+	return c.write(cks, seed, c.LoadSite())
 }
 
 // write 以 v2 格式落盘。cookies 用 RawMessage 原样嵌入，不经过结构体往返。
-func (c *localCookie) write(cks []byte, seed int) error {
+func (c *localCookie) write(cks []byte, seed int, site string) error {
 	if len(cks) == 0 {
 		cks = []byte("[]")
 	}
@@ -113,6 +140,7 @@ func (c *localCookie) write(cks []byte, seed int) error {
 	data, err := json.MarshalIndent(sessionFile{
 		Version: 2,
 		Seed:    seed,
+		Site:    site,
 		SavedAt: time.Now().Format(time.RFC3339),
 		Cookies: json.RawMessage(cks),
 	}, "", "  ")
@@ -162,7 +190,8 @@ func (c *localCookie) DeleteCookies() error {
 	if seed <= 0 {
 		return os.Remove(c.path)
 	}
-	return c.write(nil, seed)
+	// 站点一并保留：下次扫码前就能直接去对的域名取二维码；登录后会重新判定。
+	return c.write(nil, seed, c.LoadSite())
 }
 
 // GetCookiesFilePath 获取 cookies 文件路径。

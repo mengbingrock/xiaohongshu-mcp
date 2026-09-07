@@ -3,6 +3,7 @@ package configs
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 )
@@ -58,4 +59,17 @@ func Proxy() string {
 // ProxyFromEnv 从 XHS_PROXY 环境变量读取代理地址。env 读取集中在配置层。
 func ProxyFromEnv() string {
 	return os.Getenv("XHS_PROXY")
+}
+
+// SiteKeyFromEnv 从 XHS_SITE 读取站点覆盖（"cn" 或 "intl"）。未设或非法返回 ""。
+// 与 seed 一样，环境变量优先于会话文件：用于强制某个部署走指定站点。
+func SiteKeyFromEnv() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("XHS_SITE")))
+	switch v {
+	case "", "cn", "intl":
+		return v
+	default:
+		logrus.Warnf("invalid XHS_SITE=%q, ignored (site resolved from session file)", v)
+		return ""
+	}
 }

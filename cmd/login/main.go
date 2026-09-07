@@ -19,6 +19,7 @@ func main() {
 	// 登录的时候，需要界面，所以不能无头模式。
 	// 登录与后续运行共用同一个 seed：首次登录生成并写入会话文件，之后一直复用。
 	store := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+	xiaohongshu.SetSite(xiaohongshu.ResolveSite(configs.SiteKeyFromEnv(), store))
 
 	b := browser.NewBrowser(false,
 		browser.WithFingerprintSeed(configs.ResolveFingerprintSeed(store)),
