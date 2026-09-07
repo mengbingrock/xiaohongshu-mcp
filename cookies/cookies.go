@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -55,11 +56,24 @@ func (c *localCookie) LoadCookies() ([]byte, error) {
 	}
 
 	var f sessionFile
-	if err := json.Unmarshal(data, &f); err == nil && len(f.Cookies) > 0 {
+	if err := json.Unmarshal(data, &f); err == nil && f.Version >= 2 {
+		if !hasCookieEntries(f.Cookies) {
+			// v2 文件存在但 cookies 为空：账号已登出，seed 仍在。
+			return nil, ErrNoCookies
+		}
 		return f.Cookies, nil
 	}
 
 	return data, nil
+}
+
+// ErrNoCookies 表示会话文件存在但没有任何 cookie（已登出但保留了设备 seed）。
+var ErrNoCookies = errors.New("no cookies saved")
+
+// hasCookieEntries 判断 cookies 字段是否真的有条目（不是空、null 或 []）。
+func hasCookieEntries(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null" && trimmed != "[]"
 }
 
 // LoadSeed 读取会话绑定的 seed。老格式（裸数组）没有这个值，返回 0。
@@ -133,13 +147,22 @@ func (c *localCookie) write(cks []byte, seed int) error {
 	return nil
 }
 
-// DeleteCookies 删除 cookies 文件。
+// DeleteCookies 登出：清空 cookies，但保留会话文件里的设备 seed。
+//
+// seed 决定浏览器指纹。以前这里直接删文件，seed 跟着丢，下一次扫码登录就换了
+// 一套指纹——同一个账号在小红书看来每次重连都是"新设备"，很快会被风控在
+// 发布时 401 踢下线。登出只该丢凭证，不该丢设备身份。
+// 没有 seed 的老文件仍然整个删除，行为与之前一致。
 func (c *localCookie) DeleteCookies() error {
 	if _, err := os.Stat(c.path); os.IsNotExist(err) {
 		// 文件不存在，返回 nil（认为已经删除）
 		return nil
 	}
-	return os.Remove(c.path)
+	seed := c.LoadSeed()
+	if seed <= 0 {
+		return os.Remove(c.path)
+	}
+	return c.write(nil, seed)
 }
 
 // GetCookiesFilePath 获取 cookies 文件路径。

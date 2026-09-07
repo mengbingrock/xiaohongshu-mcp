@@ -27,6 +27,7 @@ type PublishVideoContent struct {
 func NewPublishVideoAction(page *rod.Page) (*PublishAction, error) {
 	trace := newPublishTrace("video")
 	pp := page.Timeout(300 * time.Second)
+	trace.AttachNetwork(pp)
 
 	if err := pp.Navigate(urlOfPublic); err != nil {
 		trace.Capture(pp, "navigation_failed")
@@ -52,6 +53,10 @@ func NewPublishVideoAction(page *rod.Page) (*PublishAction, error) {
 	trace.Capture(pp, "video_tab_ready")
 
 	time.Sleep(1 * time.Second)
+	if err := checkCreatorSession(pp); err != nil {
+		trace.Capture(pp, "creator_session_expired")
+		return nil, trace.Annotate(err)
+	}
 
 	return &PublishAction{page: pp, trace: trace}, nil
 }
@@ -115,9 +120,9 @@ func uploadVideo(page *rod.Page, videoPath string) error {
 // submitPublishVideo 填写标题、正文、标签并点击发布（等待按钮可点击后再提交）
 func submitPublishVideo(ctx context.Context, page *rod.Page, trace *publishTrace, title, content string, tags []string, scheduleTime *time.Time, visibility string, products []string) error {
 	// 标题
-	titleElem, err := page.Element("div.d-input input")
+	titleElem, err := getTitleElement(page, titleElemTimeout)
 	if err != nil {
-		return errors.Wrap(err, "查找标题输入框失败")
+		return errors.Wrap(err, "查找标题输入框失败（"+publishPageSnapshot(page)+"）")
 	}
 	if err := humanize.Type(ctx, titleElem, title); err != nil {
 		return errors.Wrap(err, "输入标题失败")

@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -123,6 +125,9 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	isLoggedIn, err := loginAction.CheckLoginStatus(ctx)
 	if err != nil {
+		if hint := rednoteRoutingHint(); hint != "" {
+			return nil, fmt.Errorf("%w；%s", err, hint)
+		}
 		return nil, err
 	}
 
@@ -138,6 +143,12 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 			response.Username = user.Nickname
 			response.UserID = user.UserID
 		}
+
+		creatorLoggedIn, err := loginAction.CheckCreatorLoginStatus(ctx)
+		if err != nil {
+			return nil, err
+		}
+		response.IsLoggedIn = creatorLoggedIn
 	}
 
 	return response, nil
@@ -195,6 +206,79 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	return response, nil
 }
 
+// rednoteRoutedMessage explains an international-routing login in the words
+// the operator needs: which account attribute caused it and that the fix is
+// on the Xiaohongshu side (scan with a CN-held account), not another reconnect.
+func rednoteRoutedMessage(holderCountry string) string {
+	where := ""
+	if holderCountry != "" {
+		where = fmt.Sprintf("（账号持有人国家/地区 = %s）", holderCountry)
+	}
+	return "扫码成功，但小红书将该账号路由到了国际版 rednote.com" + where +
+		"：国际版会话无法登录 www/creator.xiaohongshu.com，因此无法发布。请改用国内版账号扫码，或在小红书 App 中确认该账号的地区设置。"
+}
+
+// rednoteRoutingHint inspects the saved cookie file for an international-only
+// session so a failed login check names the real cause.
+func rednoteRoutingHint() string {
+	data, err := cookies.NewLoadCookie(cookies.GetCookiesFilePath()).LoadCookies()
+	if err != nil {
+		return ""
+	}
+	var cks []struct {
+		Name   string `json:"name"`
+		Value  string `json:"value"`
+		Domain string `json:"domain"`
+	}
+	if json.Unmarshal(data, &cks) != nil {
+		return ""
+	}
+	idToken, holder := false, ""
+	for _, c := range cks {
+		if !strings.Contains(c.Domain, "rednote.com") {
+			continue
+		}
+		switch c.Name {
+		case "id_token":
+			idToken = true
+		case "x-rednote-holderctry":
+			holder = c.Value
+		}
+	}
+	if !idToken {
+		return ""
+	}
+	return rednoteRoutedMessage(holder)
+}
+
+const loginSessionNotReusableMessage = "扫码成功，但保存的会话在新浏览器中未被小红书接受（可能触发了账号风控）。请稍后再试，或先在手机 App 中确认设备安全提示。"
+
+// savedSessionReusable opens a fresh browser from the cookie file, exactly as
+// a publish would, and checks www.xiaohongshu.com for a signed-in user. One
+// retry absorbs a slow first render; two misses mean Xiaohongshu is not
+// honouring the session outside the browser that created it.
+func (s *XiaohongshuService) savedSessionReusable(ctx context.Context, seq uint64) bool {
+	for attempt := 1; attempt <= 2; attempt++ {
+		var ok bool
+		err := withBrowserPage(func(page *rod.Page) error {
+			checkCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
+			defer cancel()
+			loggedIn, err := xiaohongshu.NewLogin(page).CheckLoginStatus(checkCtx)
+			ok = loggedIn
+			return err
+		})
+		logrus.Infof("保存后会话复用检查: 会话 #%d attempt=%d ok=%v err=%v", seq, attempt, ok, err)
+		if ok {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
 // waitScanInBackground 在后台等用户扫码，扫上了就存 cookie。
 //
 // 浏览器必须一直活着才检测得到扫码，所以这里不能提前关；但也不能任由它堆积——
@@ -211,6 +295,9 @@ func (s *XiaohongshuService) waitScanInBackground(
 	session.captureChallenge = loginAction.CaptureSecurityVerification
 	logrus.Infof("等待扫码登录，会话 #%d，超时 %s", session.seq, timeout)
 
+	pre, _ := loginAction.SessionCookieDigest()
+	logrus.Infof("扫码前 cookie: 会话 #%d %s", session.seq, pre)
+
 	go func() {
 		defer session.withPageOperation(closeBrowser)
 		defer cancel()
@@ -219,14 +306,41 @@ func (s *XiaohongshuService) waitScanInBackground(
 			s.logins.observe(session, mapLoginPageState(observation.State), observation.Message)
 		}) {
 			var saveErr error
+			var post xiaohongshu.SessionFacts
 			session.withPageOperation(func() {
+				loginAction.Capture("authenticated")
+				post, _ = loginAction.SessionCookieDigest()
+				logrus.Infof("扫码后 cookie: 会话 #%d %s xhs_web_session_changed=%v",
+					session.seq, post, post.XHSWebSession != pre.XHSWebSession)
 				saveErr = saveCookies(page)
+				loginAction.Capture("cookies_saved")
 			})
 			if saveErr != nil {
 				s.logins.finish(session, LoginSessionFailed, "save cookies failed")
 				logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d: %v", session.seq, saveErr)
 				return
 			}
+
+			// Xiaohongshu moved this account to the international brand after the
+			// scan. The rednote.com session cannot sign in to www/creator
+			// .xiaohongshu.com, so no amount of reconnecting will help; say so.
+			if post.RoutedToRednote() && post.XHSWebSession == pre.XHSWebSession {
+				msg := rednoteRoutedMessage(post.HolderCountry)
+				s.logins.finish(session, LoginSessionFailed, msg)
+				logrus.Errorf("扫码后被路由到 rednote.com，会话 #%d: %s", session.seq, post)
+				return
+			}
+
+			// The scan only proves the login browser is signed in. Postiz's next
+			// step opens a fresh browser from the saved file, so do that here and
+			// report a reusable-session failure with its own message instead of a
+			// misleading "authenticated" followed by "not logged in".
+			if !s.savedSessionReusable(ctxTimeout, session.seq) {
+				s.logins.finish(session, LoginSessionFailed, loginSessionNotReusableMessage)
+				logrus.Errorf("扫码成功但保存的会话在新浏览器中不可用，会话 #%d", session.seq)
+				return
+			}
+
 			s.logins.finish(session, LoginSessionAuthenticated, "")
 			logrus.Infof("扫码登录成功，cookies 已保存，会话 #%d", session.seq)
 			return
@@ -363,7 +477,16 @@ func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohon
 		return err
 	}
 
-	return action.Publish(ctx, content)
+	err = action.Publish(ctx, content)
+	if errors.Is(err, xiaohongshu.ErrCreatorSessionExpired) {
+		cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
+		if deleteErr := cookieLoader.DeleteCookies(); deleteErr != nil {
+			logrus.Errorf("creator session expired; failed to invalidate saved cookies: %v", deleteErr)
+		} else {
+			logrus.Warn("creator session expired; invalidated saved cookies so the next check requires reconnect")
+		}
+	}
+	return err
 }
 
 // PublishVideo 发布视频（本地文件）
@@ -716,7 +839,20 @@ func saveCookies(page *rod.Page) error {
 	}
 
 	cookieLoader := cookies.NewLoadCookie(cookies.GetCookiesFilePath())
-	return cookieLoader.SaveCookies(data)
+	if err := cookieLoader.SaveCookies(data); err != nil {
+		return err
+	}
+	// A first login on a profile (or a legacy file that was removed outright)
+	// has no seed on disk yet, while this process already runs with one. Persist
+	// it so a restart keeps the fingerprint the login was performed under.
+	if cookieLoader.LoadSeed() <= 0 {
+		if seed := configs.FingerprintSeed(); seed > 0 {
+			if err := cookieLoader.SaveSeed(seed); err != nil {
+				logrus.Warnf("保存会话 seed 失败: %v", err)
+			}
+		}
+	}
+	return nil
 }
 
 // withBrowserPage 执行需要浏览器页面的操作的通用函数

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -22,6 +23,9 @@ var unsafeTraceName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 type publishTrace struct {
 	directory string
 	sequence  int
+
+	mu       sync.Mutex
+	httpErrs []string
 }
 
 func newPublishTrace(kind string) *publishTrace {
@@ -84,4 +88,70 @@ func (t *publishTrace) Capture(page *rod.Page, step string) {
 		return
 	}
 	logrus.Infof("RedNote publish screenshot saved: step=%s path=%s", step, path)
+}
+
+// maxHTTPErrs bounds what one publication keeps in memory and in its error text.
+const maxHTTPErrs = 20
+
+// AttachNetwork records every HTTP error response from xiaohongshu.com for the
+// life of the page. When the creator SPA bounces to /login?redirectReason=401
+// this is the only way to learn which API actually rejected the session.
+func (t *publishTrace) AttachNetwork(page *rod.Page) {
+	if page == nil {
+		return
+	}
+	page.EnableDomain(&proto.NetworkEnable{})
+	go page.EachEvent(func(e *proto.NetworkResponseReceived) {
+		if e.Response == nil || e.Response.Status < 400 {
+			return
+		}
+		url := e.Response.URL
+		if !strings.Contains(url, "xiaohongshu.com") {
+			return
+		}
+		t.recordHTTPError(fmt.Sprintf("%d %s %s", e.Response.Status, e.Type, url))
+	})()
+}
+
+func (t *publishTrace) recordHTTPError(entry string) {
+	logrus.Warnf("RedNote HTTP error during publish: %s", entry)
+	t.mu.Lock()
+	if len(t.httpErrs) < maxHTTPErrs {
+		t.httpErrs = append(t.httpErrs, entry)
+	}
+	t.mu.Unlock()
+
+	if t.directory == "" {
+		return
+	}
+	line := time.Now().UTC().Format(time.RFC3339Nano) + " " + entry + "\n"
+	f, err := os.OpenFile(filepath.Join(t.directory, "network-errors.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(line)
+}
+
+// HTTPErrors returns the error responses seen so far, oldest first.
+func (t *publishTrace) HTTPErrors() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.httpErrs...)
+}
+
+// Annotate appends the observed HTTP errors to a failure so the message that
+// reaches Postiz names the rejecting endpoint. %w keeps errors.Is intact.
+func (t *publishTrace) Annotate(err error) error {
+	if err == nil {
+		return nil
+	}
+	errs := t.HTTPErrors()
+	if len(errs) == 0 {
+		return err
+	}
+	if len(errs) > 3 {
+		errs = errs[len(errs)-3:]
+	}
+	return fmt.Errorf("%w（最近的 HTTP 错误: %s）", err, strings.Join(errs, "; "))
 }

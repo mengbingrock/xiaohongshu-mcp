@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"os"
@@ -34,8 +35,32 @@ type PublishAction struct {
 	trace *publishTrace
 }
 
+var ErrCreatorSessionExpired = errors.New("小红书创作者中心会话已过期，请重新连接账号后再发布")
+
+type creatorSessionExpiredError struct {
+	URL    string
+	Reason string
+}
+
+func (e creatorSessionExpiredError) Error() string {
+	if e.URL == "" {
+		return ErrCreatorSessionExpired.Error()
+	}
+	if e.Reason == "" {
+		return fmt.Sprintf("%s（%s）", ErrCreatorSessionExpired, e.URL)
+	}
+	return fmt.Sprintf("%s（%s, %s）", ErrCreatorSessionExpired, e.URL, e.Reason)
+}
+
+func (e creatorSessionExpiredError) Is(target error) bool {
+	return target == ErrCreatorSessionExpired
+}
+
 const (
 	urlOfPublic = `https://creator.xiaohongshu.com/publish/publish?source=official`
+
+	// titleElemTimeout 查找新版或旧版标题输入框的轮询窗口
+	titleElemTimeout = 15 * time.Second
 
 	// contentElemTimeout 查找正文输入框的轮询窗口
 	contentElemTimeout = 10 * time.Second
@@ -44,6 +69,7 @@ const (
 func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	trace := newPublishTrace("image")
 	pp := page.Timeout(300 * time.Second)
+	trace.AttachNetwork(pp)
 
 	if err := pp.Navigate(urlOfPublic); err != nil {
 		trace.Capture(pp, "navigation_failed")
@@ -64,6 +90,10 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	trace.Capture(pp, "image_tab_ready")
 
 	time.Sleep(1 * time.Second)
+	if err := checkCreatorSession(pp); err != nil {
+		trace.Capture(pp, "creator_session_expired")
+		return nil, trace.Annotate(err)
+	}
 
 	return &PublishAction{
 		page:  pp,
@@ -81,10 +111,11 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 	defer func() {
 		if err != nil {
 			p.trace.Capture(page, "publish_failed")
+			err = p.trace.Annotate(err)
 		}
 	}()
 
-	if err := uploadImages(page, content.ImagePaths); err != nil {
+	if err := uploadImages(page, p.trace, content.ImagePaths); err != nil {
 		return errors.Wrap(err, "小红书上传图片失败")
 	}
 	p.trace.Capture(page, "images_uploaded")
@@ -95,6 +126,12 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 		tags = tags[:10]
 	}
 
+	if err := checkCreatorSession(page); err != nil {
+		p.trace.Capture(page, "pre_submit_session_check_failed")
+		return err
+	}
+	p.trace.Capture(page, "pre_submit_session_check_passed")
+
 	logrus.Infof("发布内容: title=%s, images=%v, tags=%v, schedule=%v, original=%v, visibility=%s, products=%v", content.Title, len(content.ImagePaths), tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products)
 
 	if err := submitPublish(ctx, page, p.trace, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products); err != nil {
@@ -103,6 +140,149 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 	p.trace.Capture(page, "publish_completed")
 
 	return nil
+}
+
+// sessionSettleWindow is how long a publish page is allowed to look empty
+// before we treat it as a lost session. The creator SPA swaps the upload panel
+// for the note editor after the last image finishes uploading, and the document
+// is briefly empty while that re-render happens. Sampling once inside that gap
+// reports a healthy, logged-in session as expired.
+const sessionSettleWindow = 6 * time.Second
+
+// ErrCreatorPageBlank means the publish page stopped rendering. It is
+// deliberately distinct from ErrCreatorSessionExpired: a blank document proves
+// only that this browser lost the page, never that the stored cookies are bad,
+// so callers must not invalidate credentials on it.
+var ErrCreatorPageBlank = errors.New("小红书发布页白屏，未能确认会话状态，请重试")
+
+type creatorPageBlankError struct {
+	URL string
+}
+
+func (e creatorPageBlankError) Error() string {
+	if e.URL == "" {
+		return ErrCreatorPageBlank.Error()
+	}
+	return fmt.Sprintf("%s（%s）", ErrCreatorPageBlank, e.URL)
+}
+
+func (e creatorPageBlankError) Is(target error) bool {
+	return target == ErrCreatorPageBlank
+}
+
+func checkCreatorSession(page *rod.Page) error {
+	info, err := page.Info()
+	if err != nil {
+		return nil
+	}
+
+	// A redirect to the login page is the only authoritative expiry signal.
+	if creatorSessionExpiredURL(info.URL) {
+		return creatorSessionExpiredError{URL: info.URL, Reason: "检测到重定向至登录页"}
+	}
+
+	if !onCreatorPublishPage(info.URL) {
+		return nil
+	}
+	if creatorPageIsAuthenticated(page) {
+		return nil
+	}
+
+	// The page looks empty. Re-sample instead of trusting one frame: the
+	// upload -> editor transition blanks the document for about a second.
+	deadline := time.Now().Add(sessionSettleWindow)
+	for time.Now().Before(deadline) {
+		time.Sleep(250 * time.Millisecond)
+
+		current, infoErr := page.Info()
+		if infoErr != nil {
+			continue
+		}
+		if creatorSessionExpiredURL(current.URL) {
+			return creatorSessionExpiredError{URL: current.URL, Reason: "检测到重定向至登录页"}
+		}
+		if creatorPageIsAuthenticated(page) {
+			logrus.Infof("创作中心页面短暂白屏后已恢复，会话有效: url=%s", current.URL)
+			return nil
+		}
+	}
+
+	logrus.Warnf("创作中心发布页持续白屏 %s，无法确认会话状态: url=%s", sessionSettleWindow, info.URL)
+	return creatorPageBlankError{URL: info.URL}
+}
+
+func creatorSessionExpiredURL(rawURL string) bool {
+	lowerURL := strings.ToLower(rawURL)
+	return strings.Contains(lowerURL, "creator.xiaohongshu.com/login") ||
+		strings.Contains(lowerURL, "redirectreason=401")
+}
+
+func onCreatorPublishPage(rawURL string) bool {
+	return strings.Contains(strings.ToLower(rawURL), "creator.xiaohongshu.com/publish/publish")
+}
+
+// creatorPageIsAuthenticated reports whether the publish page is showing any
+// node that only an authenticated creator session renders. Both the pre-upload
+// panel and the post-upload editor count: after the last image lands,
+// div.upload-content is legitimately gone and the editor form takes its place.
+func creatorPageIsAuthenticated(page *rod.Page) bool {
+	selectors := []string{
+		"div.upload-content",
+		`input[placeholder*="填写标题"], textarea[placeholder*="填写标题"], [contenteditable="true"][data-placeholder*="填写标题"]`,
+		`[contenteditable="true"][data-placeholder*="输入正文"], [contenteditable="true"][aria-label*="正文"]`,
+		"xhs-publish-btn, .publish-page-publish-btn button.bg-red",
+		".img-preview-area",
+	}
+	for _, selector := range selectors {
+		if has, _, err := page.Has(selector); err == nil && has {
+			return true
+		}
+	}
+
+	return creatorPageHasText(page)
+}
+
+func creatorPageHasText(page *rod.Page) bool {
+	result, err := page.Eval(`() => (document.body && document.body.innerText ? document.body.innerText : "")`)
+	if err != nil {
+		// Treat an unreadable document as "not proven empty": only a
+		// confirmed empty body may count toward the blank verdict.
+		return true
+	}
+	return strings.TrimSpace(result.Value.Str()) != ""
+}
+
+func publishPageSnapshot(page *rod.Page) string {
+	if page == nil {
+		return "页面对象为空"
+	}
+
+	info, infoErr := page.Info()
+	url := "unknown"
+	if infoErr == nil {
+		url = info.URL
+	}
+
+	diagnostics := []string{fmt.Sprintf("url=%s", url)}
+	indicators := []struct {
+		name, selector string
+	}{
+		{name: "upload_panel", selector: "div.upload-content"},
+		{name: "title_input", selector: `input[placeholder*="填写标题"], textarea[placeholder*="填写标题"], [contenteditable="true"][data-placeholder*="填写标题"]`},
+		{name: "content_input", selector: `[contenteditable="true"][data-placeholder*="输入正文"], [contenteditable="true"][aria-label*="正文"]`},
+		{name: "publish_button", selector: "xhs-publish-btn, .publish-page-publish-btn button.bg-red"},
+	}
+
+	for _, item := range indicators {
+		has, _, err := page.Has(item.selector)
+		if err != nil {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s=check_failed:%v", item.name, err))
+			continue
+		}
+		diagnostics = append(diagnostics, fmt.Sprintf("%s=%v", item.name, has))
+	}
+
+	return strings.Join(diagnostics, ", ")
 }
 
 // hasPopCover 当前页面是否还有挡人的浮层。
@@ -314,7 +494,7 @@ func isElementBlocked(elem *rod.Element) (bool, error) {
 	return result.Value.Bool(), nil
 }
 
-func uploadImages(page *rod.Page, imagesPaths []string) error {
+func uploadImages(page *rod.Page, trace *publishTrace, imagesPaths []string) error {
 	validPaths := make([]string, 0, len(imagesPaths))
 	for _, path := range imagesPaths {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -327,32 +507,45 @@ func uploadImages(page *rod.Page, imagesPaths []string) error {
 
 	// 逐张上传：每张上传后等待预览出现，再上传下一张
 	for i, path := range validPaths {
+		trace.Capture(page, fmt.Sprintf("upload_%02d_before_input", i+1))
+
 		uploadInput, err := findImageUploadInput(page, i == 0)
 		if err != nil {
+			trace.Capture(page, fmt.Sprintf("upload_%02d_input_not_found", i+1))
 			return errors.Wrapf(err, "查找上传输入框失败(第%d张)", i+1)
 		}
 		if err := uploadInput.SetFiles([]string{path}); err != nil {
+			trace.Capture(page, fmt.Sprintf("upload_%02d_setfiles_failed", i+1))
 			return errors.Wrapf(err, "上传第%d张图片失败", i+1)
 		}
 
 		slog.Info("图片已提交上传", "index", i+1, "path", path)
+		trace.Capture(page, fmt.Sprintf("upload_%02d_submitted", i+1))
 
 		// 等待当前图片上传完成（预览元素数量达到 i+1），最多等 60 秒
 		if err := waitForUploadComplete(page, i+1); err != nil {
+			trace.Capture(page, fmt.Sprintf("upload_%02d_wait_failed", i+1))
 			return errors.Wrapf(err, "第%d张图片上传超时", i+1)
 		}
+		trace.Capture(page, fmt.Sprintf("upload_%02d_preview_ready", i+1))
+
 		time.Sleep(1 * time.Second)
+
+		// The editor replaces the upload panel here; capture both sides of the
+		// session check so a false "expired" verdict is always reviewable.
+		trace.Capture(page, fmt.Sprintf("upload_%02d_before_session_check", i+1))
+		if err := checkCreatorSession(page); err != nil {
+			trace.Capture(page, fmt.Sprintf("upload_%02d_session_check_failed", i+1))
+			return err
+		}
+		trace.Capture(page, fmt.Sprintf("upload_%02d_session_check_passed", i+1))
 	}
 
 	return nil
 }
 
 // findImageUploadInput 查找图片上传的输入框
-func findImageUploadInput(page *rod.Page, first bool) (*rod.Element, error) {
-	if first {
-		return page.Element(".upload-input")
-	}
-
+func findImageUploadInput(page *rod.Page, _ bool) (*rod.Element, error) {
 	inputs, err := page.Elements(`input[type="file"]`)
 	if err != nil {
 		return nil, err
@@ -371,7 +564,7 @@ func findImageUploadInput(page *rod.Page, first bool) (*rod.Element, error) {
 		}
 	}
 
-	return inputs[0], nil
+	return nil, errors.New("页面没有接受图片格式的上传输入框")
 }
 
 // acceptsImage 判断 accept 属性是否接受图片
@@ -397,6 +590,10 @@ func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 	lastLogCount := expectedCount - 1
 
 	for time.Since(start) < maxWaitTime {
+		if err := checkCreatorSession(page); err != nil {
+			return err
+		}
+
 		uploadedImages, err := page.Elements(".img-preview-area .pr")
 		if err != nil {
 			time.Sleep(checkInterval)
@@ -420,7 +617,7 @@ func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 }
 
 func submitPublish(ctx context.Context, page *rod.Page, trace *publishTrace, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
-	titleElem, err := page.Element("div.d-input input")
+	titleElem, err := getTitleElement(page, titleElemTimeout)
 	if err != nil {
 		return errors.Wrap(err, "查找标题输入框失败")
 	}
@@ -502,17 +699,55 @@ func submitPublish(ctx context.Context, page *rod.Page, trace *publishTrace, tit
 	return nil
 }
 
+var titleElemSelectors = []string{
+	`input[placeholder*="填写标题"]`,
+	`textarea[placeholder*="填写标题"]`,
+	`[contenteditable="true"][data-placeholder*="填写标题"]`,
+	`div.d-input input`,
+}
+
+func getTitleElement(page *rod.Page, timeout time.Duration) (*rod.Element, error) {
+	deadline := time.Now().Add(timeout)
+
+	for {
+		if err := checkCreatorSession(page); err != nil {
+			return nil, err
+		}
+
+		for _, selector := range titleElemSelectors {
+			elems, err := page.Elements(selector)
+			if err != nil {
+				continue
+			}
+			for _, elem := range elems {
+				if isElementVisible(elem) {
+					return elem, nil
+				}
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return nil, errors.New("查找标题输入框超时（" + publishPageSnapshot(page) + "）")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // waitPublishSuccess 轮询等待发布成功的信号：小红书发布成功后会跳转离开发布表单页
 // （URL 不再含 /publish/publish）。超时仍未跳转 → 判定发布失败。
 func waitPublishSuccess(page *rod.Page, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
+		if err := checkCreatorSession(page); err != nil {
+			return err
+		}
+
 		if info, err := page.Info(); err == nil && !strings.Contains(info.URL, "/publish/publish") {
 			slog.Info("发布成功，已跳转离开发布页", "url", info.URL)
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return errors.New("发布未确认成功：点击发布后未跳转离开发布页（可能校验未过或被拦截）")
+			return errors.New("发布未确认成功：点击发布后未跳转离开发布页（" + publishPageSnapshot(page) + "）")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -736,6 +971,8 @@ func makeMaxLengthError(elemText string) error {
 
 // contentElemSelectors 正文输入框的候选选择器，按先后顺序尝试。
 var contentElemSelectors = []string{
+	`[contenteditable="true"][data-placeholder*="输入正文"]`,
+	`[contenteditable="true"][aria-label*="正文"]`,
 	`div[role="textbox"][contenteditable="true"]`,
 	`div.tiptap[contenteditable="true"]`,
 	`div.ql-editor`,
@@ -746,13 +983,17 @@ func getContentElement(page *rod.Page, timeout time.Duration) (*rod.Element, err
 	deadline := time.Now().Add(timeout)
 
 	for {
+		if err := checkCreatorSession(page); err != nil {
+			return nil, err
+		}
+
 		elem, err := findContentElement(page)
 		if err == nil {
 			return elem, nil
 		}
 
 		if time.Now().After(deadline) {
-			return nil, errors.Wrap(err, "查找正文输入框失败")
+			return nil, errors.Wrap(err, "查找正文输入框超时（"+publishPageSnapshot(page)+"）")
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
@@ -847,12 +1088,12 @@ func inputTag(ctx context.Context, contentElem *rod.Element, tag string) error {
 }
 
 func findTextboxByPlaceholder(page *rod.Page) (*rod.Element, error) {
-	elements, err := page.Elements("p")
+	elements, err := page.Elements(`[data-placeholder*="输入正文"]`)
 	if err != nil {
 		return nil, errors.Wrap(err, "查找正文候选元素失败")
 	}
 	if len(elements) == 0 {
-		return nil, errors.New("no p elements found")
+		return nil, errors.New("no content placeholder elements found")
 	}
 
 	placeholderElem := findPlaceholderElement(elements, "输入正文描述")
@@ -884,25 +1125,28 @@ func findPlaceholderElement(elements []*rod.Element, searchText string) *rod.Ele
 
 func findTextboxParent(elem *rod.Element) *rod.Element {
 	currentElem := elem
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 8; i++ {
+		if isTextboxElement(currentElem) {
+			return currentElem
+		}
+
 		parent, err := currentElem.Parent()
 		if err != nil {
 			break
 		}
-
-		role, err := parent.Attribute("role")
-		if err != nil || role == nil {
-			currentElem = parent
-			continue
-		}
-
-		if *role == "textbox" {
-			return parent
-		}
-
 		currentElem = parent
 	}
 	return nil
+}
+
+func isTextboxElement(elem *rod.Element) bool {
+	role, err := elem.Attribute("role")
+	if err == nil && role != nil && *role == "textbox" {
+		return true
+	}
+
+	contenteditable, err := elem.Attribute("contenteditable")
+	return err == nil && contenteditable != nil && *contenteditable == "true"
 }
 
 // isElementVisible 检查元素是否可见

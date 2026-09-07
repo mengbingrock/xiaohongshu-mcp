@@ -187,3 +187,32 @@ func TestSaveCookies_CreatesParentDir(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(got, &cks))
 	assert.Equal(t, "a", cks[0]["name"])
 }
+
+func TestDeleteCookies_KeepsSeed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.json")
+	c := NewLoadCookie(path)
+
+	assert.NoError(t, c.SaveSeed(424242))
+	assert.NoError(t, c.SaveCookies([]byte(`[{"name":"web_session","value":"x"}]`)))
+	assert.Equal(t, 424242, c.LoadSeed())
+
+	// 登出后：cookies 不可用，但 seed 必须还在，文件权限不变
+	assert.NoError(t, c.DeleteCookies())
+	_, err := c.LoadCookies()
+	assert.ErrorIs(t, err, ErrNoCookies)
+	assert.Equal(t, 424242, c.LoadSeed())
+	info, err := os.Stat(path)
+	assert.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+
+	// 再次登录后 seed 仍是原来的那个
+	assert.NoError(t, c.SaveCookies([]byte(`[{"name":"web_session","value":"y"}]`)))
+	assert.Equal(t, 424242, c.LoadSeed())
+	got, err := c.LoadCookies()
+	assert.NoError(t, err)
+	assert.Contains(t, string(got), `"y"`)
+
+	// 幂等
+	assert.NoError(t, c.DeleteCookies())
+	assert.NoError(t, c.DeleteCookies())
+}

@@ -34,6 +34,12 @@ func TestTabAcceptMatches(t *testing.T) {
 	assert.False(t, tabAcceptMatches("上传视频", ".jpg,.png"))
 }
 
+func TestCreatorSessionExpiredURL(t *testing.T) {
+	assert.True(t, creatorSessionExpiredURL("https://creator.xiaohongshu.com/login?source=official&redirectReason=401"))
+	assert.True(t, creatorSessionExpiredURL("https://creator.xiaohongshu.com/login"))
+	assert.False(t, creatorSessionExpiredURL("https://creator.xiaohongshu.com/publish/publish?source=official"))
+}
+
 func TestValidateOriginalEnabled(t *testing.T) {
 	t.Run("没有确认弹窗但开关已开启", func(t *testing.T) {
 		assert.NoError(t, validateOriginalEnabled(false, true))

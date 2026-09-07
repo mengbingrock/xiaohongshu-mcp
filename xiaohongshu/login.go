@@ -2,10 +2,15 @@ package xiaohongshu
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"github.com/sirupsen/logrus"
+	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +27,91 @@ type LoginAction struct {
 	// called by another HTTP/MCP request. Serialize those CDP operations so the
 	// code field cannot be edited while the page is being inspected or closed.
 	mu sync.Mutex
+
+	trace *publishTrace
+}
+
+// Capture stores a screenshot of the login page under the profile's debug
+// directory. A QR login that "succeeds" but leaves a session Xiaohongshu will
+// not honour looks identical to a real one in the logs; the frames are the
+// evidence.
+func (a *LoginAction) Capture(step string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.trace == nil {
+		a.trace = newPublishTrace("login")
+	}
+	a.trace.Capture(a.page, step)
+}
+
+// SessionFacts describes where a login actually landed. Xiaohongshu moves
+// accounts it classifies as overseas ("holder country" outside CN) to the
+// international brand rednote.com after the scan: the browser then holds an
+// id_token on .rednote.com while .xiaohongshu.com keeps its guest web_session,
+// and neither www.xiaohongshu.com nor creator.xiaohongshu.com will sign in.
+type SessionFacts struct {
+	XHSCookieNames []string
+	XHSWebSession  string // short hash, never the value
+	RednoteIDToken bool
+	RednoteWebSess string // short hash
+	HolderCountry  string // x-rednote-holderctry
+	DataCountry    string // x-rednote-datactry
+	CurrentURLHost string
+}
+
+// RoutedToRednote reports whether the login produced only an international
+// (rednote.com) session.
+func (f SessionFacts) RoutedToRednote() bool {
+	return f.RednoteIDToken || strings.HasSuffix(f.CurrentURLHost, "rednote.com")
+}
+
+func (f SessionFacts) String() string {
+	return fmt.Sprintf("host=%s xhs_web_session=%s rednote_id_token=%v rednote_web_session=%s holderctry=%q datactry=%q names=%v",
+		f.CurrentURLHost, f.XHSWebSession, f.RednoteIDToken, f.RednoteWebSess, f.HolderCountry, f.DataCountry, f.XHSCookieNames)
+}
+
+// SessionCookieDigest reports cookie facts from the login browser using short
+// hashes only, so a log can show whether the session cookie changed across the
+// scan and whether the login was routed to rednote.com.
+func (a *LoginAction) SessionCookieDigest() (SessionFacts, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var facts SessionFacts
+	cks, err := a.page.Browser().GetCookies()
+	if err != nil {
+		return facts, err
+	}
+	if info, infoErr := a.page.Info(); infoErr == nil {
+		if u, parseErr := url.Parse(info.URL); parseErr == nil {
+			facts.CurrentURLHost = u.Host
+		}
+	}
+	short := func(v string) string {
+		sum := sha256.Sum256([]byte(v))
+		return hex.EncodeToString(sum[:])[:8]
+	}
+	for _, c := range cks {
+		switch {
+		case strings.Contains(c.Domain, "xiaohongshu.com"):
+			facts.XHSCookieNames = append(facts.XHSCookieNames, c.Name)
+			if c.Name == "web_session" {
+				facts.XHSWebSession = short(c.Value)
+			}
+		case strings.Contains(c.Domain, "rednote.com"):
+			switch c.Name {
+			case "id_token":
+				facts.RednoteIDToken = true
+			case "web_session":
+				facts.RednoteWebSess = short(c.Value)
+			case "x-rednote-holderctry":
+				facts.HolderCountry = c.Value
+			case "x-rednote-datactry":
+				facts.DataCountry = c.Value
+			}
+		}
+	}
+	sort.Strings(facts.XHSCookieNames)
+	return facts, nil
 }
 
 var (
@@ -149,20 +239,62 @@ func verificationSubmitEnabled(className string, disabled, ariaDisabled *string)
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	// 加超时保护：只是查登录态的快速检查，不应无限挂（登录扫码的等待在 Login/WaitForLogin 里）
 	pp := a.page.Context(ctx).Timeout(30 * time.Second)
+	trace := newPublishTrace("login-check")
+	trace.AttachNetwork(pp)
 	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
 	time.Sleep(1 * time.Second)
 
 	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
 	if err != nil {
+		trace.Capture(pp, "explore_check_error")
 		return false, errors.Wrap(err, "check login status failed")
 	}
 
+	// Record what the check actually saw: a bounced session (rednote.com,
+	// login or security-verification page) fails here with the same generic
+	// message as a plain logout, and the screenshot is the only way to tell.
+	finalURL := "unknown"
+	if info, infoErr := pp.Info(); infoErr == nil {
+		finalURL = info.URL
+	}
+	logrus.Infof("登录状态检查: url=%s user_element=%v", finalURL, exists)
+
 	if !exists {
-		return false, errors.Wrap(err, "login status element not found")
+		trace.Capture(pp, "explore_not_logged_in")
+		return false, errors.Errorf("login status element not found (url=%s)", finalURL)
 	}
 
+	trace.Capture(pp, "explore_logged_in")
 	return true, nil
+}
+
+// CheckCreatorLoginStatus verifies the creator-center session used by publish
+// operations. A normal www.xiaohongshu.com session can remain valid after the
+// creator session has started redirecting to /login with redirectReason=401.
+func (a *LoginAction) CheckCreatorLoginStatus(ctx context.Context) (bool, error) {
+	pp := a.page.Context(ctx).Timeout(15 * time.Second)
+	if err := pp.Navigate(urlOfPublic); err != nil {
+		return false, errors.Wrap(err, "navigate to creator publish page failed")
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := checkCreatorSession(pp); err != nil {
+			if errors.Is(err, ErrCreatorSessionExpired) {
+				return false, nil
+			}
+			return false, err
+		}
+
+		exists, _, err := pp.Has(`div.upload-content`)
+		if err == nil && exists {
+			return true, nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	return false, errors.New("creator publish page did not expose an authenticated upload panel")
 }
 
 // CurrentUser 当前登录用户的基础信息。
