@@ -33,6 +33,9 @@ type LoginAction struct {
 	// the page (rednote.com -> xiaohongshu.com), which wipes the "scanned"
 	// markers; the OTP prompt that follows must still be classified as OTP.
 	scanSeen bool
+	// otpSeen latches once the SMS/OTP prompt has appeared, so a later return to
+	// the QR login screen can be recognised as a rejected code and auto-retried.
+	otpSeen bool
 }
 
 // Capture stores a screenshot of the login page under the profile's debug
@@ -224,6 +227,7 @@ type loginDOMObservation struct {
 	CaptchaVisible    bool   `json:"captchaVisible"`
 	SecurityQRVisible bool   `json:"securityQRVisible"`
 	QRScanned         bool   `json:"qrScanned"`
+	QRVisible         bool   `json:"qrVisible"`
 	SMSModalVisible   bool   `json:"smsModalVisible"`
 	OTPVisible        bool   `json:"otpVisible"`
 	Message           string `json:"message,omitempty"`
@@ -552,11 +556,15 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 			'.r-captcha-modal [class*="error-message"]'
 		)).find(visible);
 		const message = errorNode ? (errorNode.textContent || "").trim() : "";
+		// The login QR is the active surface (not merely mounted behind a modal)
+		// only when no SMS/OTP modal is showing over it.
+		const qrVisible = !!qr && visible(qr) && !smsModal && !otp;
 		return JSON.stringify({
 			authenticated,
 			captchaVisible: !!captcha,
 			securityQRVisible: !!securityQR,
 			qrScanned,
+			qrVisible,
 			smsModalVisible: !!smsModal,
 			otpVisible: !!otp,
 			message,
@@ -571,10 +579,27 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 	if err := json.Unmarshal([]byte(result.Value.Str()), &dom); err != nil {
 		return LoginObservation{}, errors.Wrap(err, "decode login page state failed")
 	}
-	if dom.QRScanned {
-		a.scanSeen = true
+	if dom.OTPVisible {
+		a.otpSeen = true
 	}
-	dom.QRScanned = dom.QRScanned || a.scanSeen
+
+	if a.otpSeen && dom.QRVisible && !dom.Authenticated {
+		// The SMS/OTP prompt was shown, then the page fell back to the QR login
+		// screen without authenticating — the code was rejected or expired.
+		// Release the scan+OTP latches so the state returns to waiting_for_scan
+		// and the login auto-iterates: the fresh QR can be re-scanned and a new
+		// code entered, instead of stalling at qr_scanned. Logged once per
+		// revert (the latches gate re-entry).
+		logrus.Infof("验证码提交后回到二维码登录界面（未登录），重置为等待扫码并自动重试")
+		a.scanSeen = false
+		a.otpSeen = false
+		dom.QRScanned = false
+	} else {
+		if dom.QRScanned {
+			a.scanSeen = true
+		}
+		dom.QRScanned = dom.QRScanned || a.scanSeen
+	}
 	obs := classifyLoginDOMObservation(dom)
 	obs.Debug = dom.Debug
 	return obs, nil
@@ -718,91 +743,86 @@ func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) e
 	}
 	a.captureLocked("otp_typed")
 
-	buttonDeadline := time.Now().Add(3 * time.Second)
+	// Click the SMS/captcha modal's primary confirm button. Xiaohongshu's modal
+	// text varies (验证/确认/确定/登录/下一步/完成) and the button is sometimes
+	// icon-only, so instead of matching exact text we locate the visible,
+	// enabled, non-close action inside the captcha modal and click it. The JS
+	// returns a dump of the candidate buttons so a miss is diagnosable. Some
+	// codes auto-submit on the sixth keystroke and dismiss the modal first; that
+	// is handled below. Poll for ~6s because the button enables a beat after the
+	// code is entered.
+	clickJS := `() => {
+		const vis = (el) => { if(!el) return false; const s=getComputedStyle(el); const r=el.getBoundingClientRect(); return s.display!=="none"&&s.visibility!=="hidden"&&Number(s.opacity||"1")!==0&&r.width>0&&r.height>0; };
+		const modal = Array.from(document.querySelectorAll(".r-captcha-modal, [class*=\"captcha-modal\"]")).find(vis);
+		if(!modal) return JSON.stringify({modal:false});
+		const isClose = (el)=>/close|关闭/i.test((el.className||"")+" "+(el.getAttribute("aria-label")||""));
+		const enabled = (el)=>!el.disabled && el.getAttribute("aria-disabled")!=="true" && !/\bdisabled\b|btn-disabled/.test(el.className||"");
+		let cands = Array.from(modal.querySelectorAll("button, [role=button], input[type=button], input[type=submit], [class*=submit], [class*=btn], [class*=button]"))
+			.filter(el=>vis(el)&&!isClose(el));
+		const dump = cands.map(el=>({t:(el.innerText||el.value||"").trim().slice(0,14), c:(el.className||"").toString().slice(0,50), en:enabled(el)}));
+		const enabledCands = cands.filter(enabled);
+		let target = enabledCands.find(el=>/验证|确认|确定|提交|登录|下一步|完成|确\s*定/.test(el.innerText||el.value||""));
+		if(!target) target = enabledCands[enabledCands.length-1];
+		if(!target) return JSON.stringify({modal:true, clicked:false, dump});
+		target.click();
+		return JSON.stringify({modal:true, clicked:true, text:(target.innerText||target.value||"").trim(), dump});
+	}`
+
+	deadline := time.Now().Add(6 * time.Second)
 	for {
-		buttons, buttonsErr := pp.Elements(`
-			.r-captcha-modal button,
-			.r-captcha-modal [role="button"],
-			.r-captcha-modal input[type="button"],
-			.r-captcha-modal input[type="submit"],
-			.r-captcha-modal [class*="submit"],
-			.r-captcha-modal [class*="button"],
-			.r-captcha-modal [class*="btn"],
-			.login-container button.submit,
-			button.submit,
-			button
-		`)
-		if buttonsErr == nil {
-			for _, button := range buttons {
-				visible, visibleErr := button.Visible()
-				if visibleErr != nil || !visible || insideLoginForm(button) {
-					continue
-				}
-				text, textErr := button.Text()
-				if textErr != nil {
-					continue
-				}
-				if value, valueErr := button.Attribute("value"); valueErr == nil && value != nil && strings.TrimSpace(text) == "" {
-					text = *value
-				}
-				if !isVerificationSubmitText(text) {
-					continue
-				}
-
-				className := ""
-				if class, classErr := button.Attribute("class"); classErr == nil && class != nil {
-					className = *class
-				}
-				disabled, _ := button.Attribute("disabled")
-				ariaDisabled, _ := button.Attribute("aria-disabled")
-				if !verificationSubmitEnabled(className, disabled, ariaDisabled) {
-					continue
-				}
-
-				if err := button.Click(proto.InputMouseButtonLeft, 1); err != nil {
-					a.captureLocked("otp_submit_click_failed")
-					return fmt.Errorf("submit verification code: %w", err)
-				}
+		res, evalErr := pp.Eval(clickJS)
+		if evalErr == nil {
+			var out struct {
+				Modal   bool `json:"modal"`
+				Clicked bool `json:"clicked"`
+				Text    string
+				Dump    []struct {
+					T  string `json:"t"`
+					C  string `json:"c"`
+					En bool   `json:"en"`
+				} `json:"dump"`
+			}
+			_ = json.Unmarshal([]byte(res.Value.Str()), &out)
+			if out.Clicked {
+				logrus.Infof("验证码提交：点击确认按钮 text=%q candidates=%+v", out.Text, out.Dump)
 				time.Sleep(1500 * time.Millisecond)
 				a.captureLocked("otp_submitted")
 				return nil
 			}
+			if len(out.Dump) > 0 {
+				logrus.Infof("验证码提交：暂无可点击确认按钮 candidates=%+v", out.Dump)
+			}
 		}
 
-		if time.Now().After(buttonDeadline) {
-			// The live Xiaohongshu SMS component auto-submits some valid codes
-			// as soon as the sixth trusted key event arrives. In that path the
-			// modal disappears before there is an enabled button to click. Treat
-			// disappearance as a successful page submission; the background
-			// observer still requires the authenticated marker before saving any
-			// cookies or marking the session authenticated.
-			modalInputs, modalInputsErr := pp.Elements(`
+		if time.Now().After(deadline) {
+			// Auto-submit path: the modal's code input is gone, so the page
+			// already consumed the code. The observer still requires the
+			// authenticated marker before saving cookies.
+			modalInputs, mErr := pp.Elements(`
 				.r-captcha-modal input[placeholder*="验证码"],
 				.r-captcha-modal input[autocomplete="one-time-code"],
 				.r-captcha-modal input[maxlength="6"]
 			`)
-			if modalInputsErr == nil {
-				modalInputVisible := false
-				for _, modalInput := range modalInputs {
-					visible, visibleErr := modalInput.Visible()
-					if visibleErr == nil && visible {
-						modalInputVisible = true
+			if mErr == nil {
+				visibleLeft := false
+				for _, mi := range modalInputs {
+					if v, e := mi.Visible(); e == nil && v {
+						visibleLeft = true
 						break
 					}
 				}
-				if !modalInputVisible {
+				if !visibleLeft {
+					a.captureLocked("otp_submitted_auto")
 					return nil
 				}
 			}
-			if buttonsErr != nil {
-				return errors.Wrap(ErrVerificationCodeSubmitNotFound, "find enabled verification code submit button")
-			}
+			a.captureLocked("otp_submit_button_not_found")
 			return ErrVerificationCodeSubmitNotFound
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(150 * time.Millisecond):
 		}
 	}
 }
