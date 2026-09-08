@@ -155,8 +155,8 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 }
 
 // GetLoginQrcode 获取登录的扫码二维码
-func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
-	b := newBrowser()
+func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context, visible bool) (*LoginQrcodeResponse, error) {
+	b := newLoginBrowser(visible)
 	page := b.NewPage()
 
 	deferFunc := func() {
@@ -241,13 +241,19 @@ func (s *XiaohongshuService) savedSessionReusable(ctx context.Context, seq uint6
 func (s *XiaohongshuService) waitScanInBackground(
 	loginAction *xiaohongshu.LoginAction, page *rod.Page, closeBrowser func(), timeout time.Duration,
 ) (*loginSession, error) {
-	ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
-	session, err := s.logins.start(cancel, loginAction.SubmitVerificationCode, time.Now().Add(timeout))
+	// The context outlives the scan window by otpGrace so a session that has
+	// been scanned can wait for the SMS code; an unscanned session is still cut
+	// at `timeout` by the observer below.
+	const otpGrace = 6 * time.Minute
+	scanDeadline := time.Now().Add(timeout)
+	ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout+otpGrace)
+	session, err := s.logins.start(cancel, loginAction.SubmitVerificationCode, scanDeadline)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("create login session: %w", err)
 	}
 	session.captureChallenge = loginAction.CaptureSecurityVerification
+	session.requestCode = loginAction.RequestVerificationCode
 	logrus.Infof("等待扫码登录，会话 #%d，超时 %s", session.seq, timeout)
 
 	pre, _ := loginAction.SessionCookieDigest()
@@ -257,7 +263,46 @@ func (s *XiaohongshuService) waitScanInBackground(
 		defer session.withPageOperation(closeBrowser)
 		defer cancel()
 
+		// Log and photograph every state transition: "scanned but no OTP
+		// prompt" is invisible in the UI without this.
+		var lastState xiaohongshu.LoginPageState
+		var scanSeenAt, lastTick time.Time
+		autoSent := false
 		if loginAction.WaitForLoginWithState(ctxTimeout, func(observation xiaohongshu.LoginObservation) {
+			if observation.State != lastState {
+				logrus.Infof("登录页状态变化: 会话 #%d %s -> %s message=%q dom=%s",
+					session.seq, lastState, observation.State, observation.Message, observation.Debug)
+				loginAction.Capture("state_" + string(observation.State))
+				lastState = observation.State
+				if observation.State == xiaohongshu.LoginPageOTPRequired && !autoSent {
+					// Make sure the SMS is actually requested: the modal's
+					// 发送/获取/重新获取 control is what triggers it.
+					autoSent = true
+					go func() {
+						time.Sleep(2 * time.Second)
+						clicked, phone, err := loginAction.RequestVerificationCode(ctxTimeout)
+						logrus.Infof("首次要求验证码，自动点击发送: 会话 #%d clicked=%q phone=%q err=%v", session.seq, clicked, phone, err)
+					}()
+				}
+				if scanSeenAt.IsZero() && observation.State != xiaohongshu.LoginPageWaitingForScan {
+					// Scanned (or straight into OTP/captcha): give the user time
+					// for the SMS round-trip.
+					scanSeenAt = time.Now()
+					until := s.logins.extend(session, time.Now().Add(otpGrace))
+					logrus.Infof("扫码已确认，会话 #%d 有效期延长至 %s", session.seq, until.Format(time.RFC3339))
+				}
+			}
+			if scanSeenAt.IsZero() && time.Now().After(scanDeadline) {
+				cancel() // no scan within the QR window: end as before
+				return
+			}
+			// After a scan, keep a frame + DOM summary every 15s so a prompt we
+			// fail to classify is still on record.
+			if !scanSeenAt.IsZero() && time.Since(lastTick) > 15*time.Second {
+				lastTick = time.Now()
+				logrus.Infof("扫码后观察: 会话 #%d state=%s dom=%s", session.seq, observation.State, observation.Debug)
+				loginAction.Capture("post_scan_tick")
+			}
 			s.logins.observe(session, mapLoginPageState(observation.State), observation.Message)
 		}) {
 			var saveErr error
@@ -342,6 +387,12 @@ func (s *XiaohongshuService) GetLoginSessionStatus(ctx context.Context, sessionI
 
 // SubmitLoginCode enters the OTP into the same headless page that generated the
 // QR code. The code is validated before it reaches the browser session manager.
+// ResendLoginCode clicks the SMS modal's resend control for the session.
+func (s *XiaohongshuService) ResendLoginCode(ctx context.Context, sessionID string) (*LoginSessionStatus, string, string, error) {
+	status, clicked, phone, err := s.logins.resendCode(ctx, sessionID)
+	return &status, clicked, phone, err
+}
+
 func (s *XiaohongshuService) SubmitLoginCode(ctx context.Context, req SubmitLoginCodeRequest) (*LoginSessionStatus, error) {
 	if err := xiaohongshu.ValidateVerificationCode(req.Code); err != nil {
 		return nil, err
@@ -780,6 +831,22 @@ func (s *XiaohongshuService) ReplyNotification(ctx context.Context, commentID, c
 
 func newBrowser() *headless_browser.Browser {
 	return browser.NewBrowser(configs.IsHeadless(),
+		browser.WithFingerprintSeed(configs.FingerprintSeed()),
+		browser.WithProxy(configs.Proxy()),
+	)
+}
+
+// newLoginBrowser builds the browser for an interactive login. When visible is
+// true the browser runs headful (on the process DISPLAY) so a human can scan
+// and type directly — e.g. through an embedded VNC view — while publishing and
+// the default QR-relay login stay headless. visible=false keeps the existing
+// behaviour exactly.
+func newLoginBrowser(visible bool) *headless_browser.Browser {
+	headless := configs.IsHeadless()
+	if visible {
+		headless = false
+	}
+	return browser.NewBrowser(headless,
 		browser.WithFingerprintSeed(configs.FingerprintSeed()),
 		browser.WithProxy(configs.Proxy()),
 	)

@@ -60,7 +60,8 @@ func (s *AppServer) checkLoginStatusHandler(c *gin.Context) {
 // 用于生成并返回登录二维码（Base64 图片 + 超时时间），供前端展示给用户扫码登录。
 func (s *AppServer) getLoginQrcodeHandler(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	result, err := s.xiaohongshuService.GetLoginQrcode(c.Request.Context())
+	visible := c.Query("visible") == "true" || c.Query("visible") == "1"
+	result, err := s.xiaohongshuService.GetLoginQrcode(c.Request.Context(), visible)
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "STATUS_CHECK_FAILED",
 			"获取登录二维码失败", err.Error())

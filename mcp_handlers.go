@@ -61,10 +61,14 @@ func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 
 // handleGetLoginQrcode 处理获取登录二维码请求。
 // 返回二维码图片的 Base64 编码和超时时间，供前端展示扫码登录。
-func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
-	logrus.Info("MCP: 获取登录扫码图片")
+func (s *AppServer) handleGetLoginQrcode(ctx context.Context, visible bool) *MCPToolResult {
+	if visible {
+		logrus.Info("MCP: 获取登录扫码图片 (可见浏览器/VNC 模式)")
+	} else {
+		logrus.Info("MCP: 获取登录扫码图片")
+	}
 
-	result, err := s.xiaohongshuService.GetLoginQrcode(ctx)
+	result, err := s.xiaohongshuService.GetLoginQrcode(ctx, visible)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{Type: "text", Text: "获取登录扫码图片失败: " + err.Error()}},
@@ -190,6 +194,29 @@ func (s *AppServer) handleSubmitLoginCode(ctx context.Context, sessionID, code s
 		Content: []MCPContent{{Type: "text", Text: message}},
 		IsError: true,
 	}
+}
+
+// handleResendLoginCode 点击扫码页面上的“重新获取/发送验证码”，用于短信未收到的情况。
+func (s *AppServer) handleResendLoginCode(ctx context.Context, sessionID string) *MCPToolResult {
+	status, clicked, phone, err := s.xiaohongshuService.ResendLoginCode(ctx, sessionID)
+	if err == nil {
+		text := "已点击「" + clicked + "」"
+		if phone != "" {
+			text += "，验证码将发送至 " + phone
+		}
+		text += "。当前状态：" + describeLoginSessionState(status.State)
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: text}}}
+	}
+	message := "重新发送验证码失败"
+	switch {
+	case errors.Is(err, xiaohongshu.ErrVerificationCodeCooldown):
+		message = "验证码发送冷却中，请稍后再试（" + err.Error() + "）"
+	case errors.Is(err, xiaohongshu.ErrVerificationCodeSendNotFound), errors.Is(err, ErrLoginCodeNotRequired):
+		message = "页面当前没有显示验证码发送控件；请确认已扫码并且小红书要求输入验证码"
+	case errors.Is(err, ErrLoginSessionNotFound), errors.Is(err, ErrLoginSessionClosed):
+		message = "登录会话不存在或已经结束，请重新获取二维码"
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: message}}, IsError: true}
 }
 
 // handleDeleteCookies 处理删除 cookies 请求，用于登录重置

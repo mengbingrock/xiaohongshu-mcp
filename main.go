@@ -9,6 +9,7 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/internal/chineseinla"
+	"github.com/xpzouying/xiaohongshu-mcp/internal/reddit"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
@@ -19,6 +20,10 @@ func main() {
 	chineseInLAConfig, err := chineseinla.DefaultConfig()
 	if err != nil {
 		logrus.Fatalf("invalid ChineseInLA configuration: %v", err)
+	}
+	redditConfig, err := reddit.DefaultConfig()
+	if err != nil {
+		logrus.Fatalf("invalid Reddit configuration: %v", err)
 	}
 
 	var (
@@ -36,6 +41,9 @@ func main() {
 	flag.StringVar(&chineseInLAConfig.StatePath, "chineseinla-state-file", chineseInLAConfig.StatePath, "ChineseInLA 待发布草稿状态文件")
 	flag.StringVar(&chineseInLAConfig.PreviewPath, "chineseinla-preview-image", chineseInLAConfig.PreviewPath, "ChineseInLA 无头预览图片路径")
 	flag.StringVar(&chineseInLAConfig.BrowserBin, "chineseinla-browser-bin", chineseInLAConfig.BrowserBin, "ChineseInLA 浏览器可执行文件")
+	flag.BoolVar(&redditConfig.Headless, "reddit-headless", redditConfig.Headless, "Reddit 是否使用无头模式（Reddit 可能会阻止无头浏览器）")
+	flag.StringVar(&redditConfig.ProfileRoot, "reddit-profile-root", redditConfig.ProfileRoot, "Postiz Reddit 独立浏览器配置根目录")
+	flag.StringVar(&redditConfig.BrowserBin, "reddit-browser-bin", redditConfig.BrowserBin, "Reddit 浏览器可执行文件")
 	flag.Parse()
 	if err := chineseinla.ValidateCookieIsolation(chineseInLAConfig.CookiePath, cookies.GetCookiesFilePath()); err != nil {
 		logrus.Fatalf("invalid cookie configuration: %v", err)
@@ -69,10 +77,14 @@ func main() {
 	if chineseInLAConfig.BrowserBin == "" {
 		chineseInLAConfig.BrowserBin = binPath
 	}
+	if redditConfig.BrowserBin == "" {
+		redditConfig.BrowserBin = binPath
+	}
 	chineseInLAService := chineseinla.NewAutomation(chineseInLAConfig)
+	redditService := reddit.NewAutomation(redditConfig)
 
 	// 创建并启动应用服务器
-	appServer := NewAppServerWithChineseInLA(xiaohongshuService, chineseInLAService, token)
+	appServer := NewAppServerWithServices(xiaohongshuService, chineseInLAService, redditService, token)
 	if err := appServer.Start(port); err != nil {
 		logrus.Fatalf("failed to run server: %v", err)
 	}

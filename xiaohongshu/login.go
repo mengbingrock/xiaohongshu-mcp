@@ -29,6 +29,10 @@ type LoginAction struct {
 	mu sync.Mutex
 
 	trace *publishTrace
+	// scanSeen latches once the QR was scanned. Xiaohongshu may then redirect
+	// the page (rednote.com -> xiaohongshu.com), which wipes the "scanned"
+	// markers; the OTP prompt that follows must still be classified as OTP.
+	scanSeen bool
 }
 
 // Capture stores a screenshot of the login page under the profile's debug
@@ -38,10 +42,79 @@ type LoginAction struct {
 func (a *LoginAction) Capture(step string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.captureLocked(step)
+}
+
+// captureLocked is Capture for callers that already hold a.mu.
+func (a *LoginAction) captureLocked(step string) {
 	if a.trace == nil {
 		a.trace = newPublishTrace("login")
 	}
 	a.trace.Capture(a.page, step)
+}
+
+// ErrVerificationCodeSendNotFound means no visible "send/resend code" control
+// exists on the page (the SMS modal is not open).
+var ErrVerificationCodeSendNotFound = errors.New("verification code send control not found")
+
+// ErrVerificationCodeCooldown means the resend control is counting down.
+var ErrVerificationCodeCooldown = errors.New("verification code resend is cooling down")
+
+// RequestVerificationCode clicks the SMS modal's send/resend control
+// (发送验证码 / 获取验证码 / 重新获取). Xiaohongshu sends the first code when the
+// modal opens, so this mostly serves "I never received it". Returns the label
+// that was clicked and the masked phone number shown in the modal, if any.
+func (a *LoginAction) RequestVerificationCode(ctx context.Context) (clicked string, phone string, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	pp := a.page.Context(ctx).Timeout(15 * time.Second)
+	a.captureLocked("otp_resend_before")
+	res, evalErr := pp.Eval(`() => {
+		const visible = (el) => {
+			if (!el) return false;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.display !== "none" && style.visibility !== "hidden" &&
+				Number(style.opacity || "1") !== 0 && rect.width > 0 && rect.height > 0;
+		};
+		const inLoginForm = (el) => !!el.closest('.login-container, .login-modal, [class*="login-container"]');
+		const modal = Array.from(document.querySelectorAll('.r-captcha-modal, [class*="captcha-modal"]')).find(visible) || document.body;
+		const phone = ((modal.innerText || "").match(/(\*{3,}\d{2,4}|\+?\d[\d\s-]{6,}\d)/) || [""])[0];
+		const candidates = Array.from(modal.querySelectorAll('a, button, span, div, [role="button"]'))
+			.filter((el) => visible(el) && !inLoginForm(el) && el.children.length <= 1)
+			.map((el) => ({ el, text: (el.innerText || el.textContent || "").trim() }))
+			.filter(({ text }) => text.length <= 12 && /重新获取|重新发送|重发|获取验证码|发送验证码|resend|send code/i.test(text));
+		if (!candidates.length) return JSON.stringify({ found: false, phone });
+		const target = candidates[0];
+		const cooldown = /\d+\s*(s|秒)/.test(target.text);
+		if (!cooldown) target.el.click();
+		return JSON.stringify({ found: true, text: target.text, cooldown, phone });
+	}`)
+	if evalErr != nil {
+		return "", "", errors.Wrap(evalErr, "inspect verification code controls")
+	}
+	var out struct {
+		Found    bool   `json:"found"`
+		Text     string `json:"text"`
+		Cooldown bool   `json:"cooldown"`
+		Phone    string `json:"phone"`
+	}
+	if jsonErr := json.Unmarshal([]byte(res.Value.Str()), &out); jsonErr != nil {
+		return "", "", errors.Wrap(jsonErr, "decode verification code controls")
+	}
+	if !out.Found {
+		a.captureLocked("otp_resend_not_found")
+		return "", out.Phone, ErrVerificationCodeSendNotFound
+	}
+	if out.Cooldown {
+		a.captureLocked("otp_resend_cooldown")
+		return out.Text, out.Phone, errors.Wrapf(ErrVerificationCodeCooldown, "%s", out.Text)
+	}
+	time.Sleep(800 * time.Millisecond)
+	a.captureLocked("otp_resend_clicked")
+	logrus.Infof("已点击验证码发送控件: %q phone=%q", out.Text, out.Phone)
+	return out.Text, out.Phone, nil
 }
 
 // SessionFacts describes where a login actually landed. Xiaohongshu moves
@@ -137,6 +210,9 @@ const (
 type LoginObservation struct {
 	State   LoginPageState `json:"state"`
 	Message string         `json:"message,omitempty"`
+	// Debug is a compact description of the visible inputs/modals and the page
+	// host, for logs only.
+	Debug string `json:"debug,omitempty"`
 }
 
 // loginDOMObservation contains facts collected from the page. Keeping the
@@ -151,6 +227,7 @@ type loginDOMObservation struct {
 	SMSModalVisible   bool   `json:"smsModalVisible"`
 	OTPVisible        bool   `json:"otpVisible"`
 	Message           string `json:"message,omitempty"`
+	Debug             string `json:"debug,omitempty"`
 }
 
 func NewLogin(page *rod.Page) *LoginAction {
@@ -439,11 +516,26 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 					"img, canvas, svg, [class*=qrcode], [class*=qr-code], [style*=background-image]"
 				));
 		});
-		const otp = Array.from(document.querySelectorAll(
+		const otpScoped = Array.from(document.querySelectorAll(
 			'.r-captcha-modal input[placeholder*="验证码"], ' +
 			'.r-captcha-modal input[autocomplete="one-time-code"], ' +
 			'.r-captcha-modal input[maxlength="6"]'
 		)).find(visible);
+		// The SMS prompt is not always mounted under .r-captcha-modal (the page
+		// may have been redirected to the other brand after the scan). Accept a
+		// visible code input anywhere EXCEPT the login modal's own phone-number
+		// form, which always shows a 输入验证码 field.
+		const inLoginForm = (el) => !!el.closest('.login-container, .login-modal, [class*="login-container"]');
+		const otpLoose = Array.from(document.querySelectorAll(
+			'input[placeholder*="验证码"], input[autocomplete="one-time-code"], input[maxlength="6"]'
+		)).find((el) => visible(el) && !inLoginForm(el));
+		const otp = otpScoped || otpLoose;
+		const dbgInputs = Array.from(document.querySelectorAll("input")).filter(visible).map((el) =>
+			(el.placeholder || el.getAttribute("aria-label") || el.name || el.type || "?") + (inLoginForm(el) ? "[login-form]" : "")
+		).slice(0, 10);
+		const dbgModals = Array.from(document.querySelectorAll('[class*="modal"], [class*="captcha"], [class*="dialog"], [role="dialog"]'))
+			.filter(visible).map((el) => (el.className || "").toString().split(" ").filter(Boolean).slice(0, 3).join(".")).slice(0, 8);
+		const debug = location.host + " inputs=" + JSON.stringify(dbgInputs) + " modals=" + JSON.stringify(dbgModals);
 		const captcha = Array.from(document.querySelectorAll(
 			'iframe[src*="captcha"], [class*="captcha"], [id*="captcha"]'
 		)).find((el) => {
@@ -468,6 +560,7 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 			smsModalVisible: !!smsModal,
 			otpVisible: !!otp,
 			message,
+			debug,
 		});
 	}`)
 	if err != nil {
@@ -478,7 +571,13 @@ func (a *LoginAction) ObserveLoginState(ctx context.Context) (LoginObservation, 
 	if err := json.Unmarshal([]byte(result.Value.Str()), &dom); err != nil {
 		return LoginObservation{}, errors.Wrap(err, "decode login page state failed")
 	}
-	return classifyLoginDOMObservation(dom), nil
+	if dom.QRScanned {
+		a.scanSeen = true
+	}
+	dom.QRScanned = dom.QRScanned || a.scanSeen
+	obs := classifyLoginDOMObservation(dom)
+	obs.Debug = dom.Debug
+	return obs, nil
 }
 
 // CaptureSecurityVerification refreshes an expired account-security QR inside
@@ -580,7 +679,10 @@ func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) e
 	inputs, err := pp.Elements(`
 		.r-captcha-modal input[placeholder*="验证码"],
 		.r-captcha-modal input[autocomplete="one-time-code"],
-		.r-captcha-modal input[maxlength="6"]
+		.r-captcha-modal input[maxlength="6"],
+		input[placeholder*="验证码"],
+		input[autocomplete="one-time-code"],
+		input[maxlength="6"]
 	`)
 	if err != nil {
 		return errors.Wrap(ErrVerificationCodeInputNotFound, "find verification code input")
@@ -589,14 +691,17 @@ func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) e
 	var codeInput *rod.Element
 	for _, candidate := range inputs {
 		visible, visibleErr := candidate.Visible()
-		if visibleErr == nil && visible {
-			codeInput = candidate
-			break
+		if visibleErr != nil || !visible || insideLoginForm(candidate) {
+			continue
 		}
+		codeInput = candidate
+		break
 	}
 	if codeInput == nil {
+		a.captureLocked("otp_input_not_found")
 		return ErrVerificationCodeInputNotFound
 	}
+	a.captureLocked("otp_before_typing")
 
 	if err := codeInput.SelectAllText(); err != nil {
 		return fmt.Errorf("select verification code input: %w", err)
@@ -611,6 +716,7 @@ func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) e
 	if err := pp.Keyboard.Type(verificationCodeKeys(code)...); err != nil {
 		return fmt.Errorf("fill verification code input: %w", err)
 	}
+	a.captureLocked("otp_typed")
 
 	buttonDeadline := time.Now().Add(3 * time.Second)
 	for {
@@ -623,12 +729,13 @@ func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) e
 			.r-captcha-modal [class*="button"],
 			.r-captcha-modal [class*="btn"],
 			.login-container button.submit,
-			button.submit
+			button.submit,
+			button
 		`)
 		if buttonsErr == nil {
 			for _, button := range buttons {
 				visible, visibleErr := button.Visible()
-				if visibleErr != nil || !visible {
+				if visibleErr != nil || !visible || insideLoginForm(button) {
 					continue
 				}
 				text, textErr := button.Text()
@@ -653,8 +760,11 @@ func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) e
 				}
 
 				if err := button.Click(proto.InputMouseButtonLeft, 1); err != nil {
+					a.captureLocked("otp_submit_click_failed")
 					return fmt.Errorf("submit verification code: %w", err)
 				}
+				time.Sleep(1500 * time.Millisecond)
+				a.captureLocked("otp_submitted")
 				return nil
 			}
 		}
@@ -695,4 +805,12 @@ func (a *LoginAction) SubmitVerificationCode(ctx context.Context, code string) e
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// insideLoginForm reports whether an element belongs to the login modal's own
+// phone-number form, whose permanent 验证码 field must never be mistaken for
+// the post-scan SMS prompt.
+func insideLoginForm(el *rod.Element) bool {
+	res, err := el.Eval(`() => !!this.closest('.login-container, .login-modal, [class*="login-container"]')`)
+	return err == nil && res.Value.Bool()
 }

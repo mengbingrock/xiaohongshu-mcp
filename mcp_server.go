@@ -20,6 +20,11 @@ type LoginSessionArgs struct {
 	SessionID string `json:"session_id" jsonschema:"get_login_qrcode 返回的登录会话 ID"`
 }
 
+// LoginQrcodeArgs are the get_login_qrcode parameters.
+type LoginQrcodeArgs struct {
+	Visible bool `json:"visible,omitempty" jsonschema:"true 时以可见（非无头）浏览器打开登录页，便于通过 VNC 人工扫码/输入验证码；默认 false 保持无头二维码模式"`
+}
+
 // SubmitLoginCodeArgs carries the short-lived OTP. The server never logs or
 // echoes Code, but remote MCP clients may retain tool arguments in their own
 // history; a direct authenticated HTTPS call is preferable in shared clouds.
@@ -210,14 +215,14 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "get_login_qrcode",
-			Description: "获取登录二维码（返回 Base64 图片和超时时间）",
+			Description: "获取登录二维码（返回 Base64 图片和超时时间）。可选 visible=true 时改用可见浏览器（配合 VNC 人工扫码/输入验证码）。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Get Login QR Code",
 				DestructiveHint: boolPtr(false),
 			},
 		},
-		withPanicRecovery("get_login_qrcode", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleGetLoginQrcode(ctx)
+		withPanicRecovery("get_login_qrcode", func(ctx context.Context, req *mcp.CallToolRequest, args LoginQrcodeArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleGetLoginQrcode(ctx, args.Visible)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -253,6 +258,23 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 		withPanicRecovery("submit_login_code", func(ctx context.Context, req *mcp.CallToolRequest, args SubmitLoginCodeArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleSubmitLoginCode(ctx, args.SessionID, args.Code)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 短信未收到时，点击原登录页面上的“重新获取/发送验证码”。
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "resend_login_code",
+			Description: "扫码后小红书要求输入短信验证码但手机未收到时调用；点击原 headless 登录页面上的“重新获取/发送验证码”控件。若控件正在倒计时会返回冷却提示。",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Resend Login Code",
+				DestructiveHint: boolPtr(false),
+				OpenWorldHint:   boolPtr(true),
+			},
+		},
+		withPanicRecovery("resend_login_code", func(ctx context.Context, req *mcp.CallToolRequest, args LoginSessionArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleResendLoginCode(ctx, args.SessionID)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -597,8 +619,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	)
 
 	registerChineseInLATools(server, appServer)
+	registerRedditTools(server, appServer)
 
-	logrus.Infof("Registered %d MCP tools", 27)
+	logrus.Infof("Registered %d MCP tools", 35)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

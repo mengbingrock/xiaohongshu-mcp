@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/internal/chineseinla"
+	"github.com/xpzouying/xiaohongshu-mcp/internal/reddit"
 )
 
 // ChineseInLAService is the subset of the ChineseInLA automation exposed by MCP.
@@ -31,11 +32,23 @@ type ChineseInLAService interface {
 	PublishPrepared(context.Context, string, bool) (chineseinla.PublishResult, error)
 }
 
+type RedditService interface {
+	CheckLogin(context.Context, string) (reddit.LoginStatus, error)
+	ListForums(context.Context, reddit.ListForumsRequest) (reddit.ListForumsResult, error)
+	Restrictions(context.Context, reddit.RestrictionsRequest) (reddit.RestrictionsResult, error)
+	ListPosts(context.Context, reddit.ListPostsRequest) (reddit.ListPostsResult, error)
+	ReadPost(context.Context, reddit.ReadPostRequest) (reddit.ReadPostResult, error)
+	Publish(context.Context, reddit.PublishRequest) (reddit.PublishResult, error)
+	Comment(context.Context, reddit.CommentRequest) (reddit.CommentResult, error)
+}
+
 // AppServer 应用服务器结构体，封装所有服务和处理器
 type AppServer struct {
 	xiaohongshuService *XiaohongshuService
 	chineseInLAService ChineseInLAService
 	chineseInLAMu      sync.Mutex
+	redditService      RedditService
+	redditMu           sync.Mutex
 	mcpServer          *mcp.Server
 	router             *gin.Engine
 	httpServer         *http.Server
@@ -44,15 +57,20 @@ type AppServer struct {
 
 // NewAppServer 创建新的应用服务器实例
 func NewAppServer(xiaohongshuService *XiaohongshuService, authToken string) *AppServer {
-	return NewAppServerWithChineseInLA(xiaohongshuService, nil, authToken)
+	return NewAppServerWithServices(xiaohongshuService, nil, nil, authToken)
 }
 
 // NewAppServerWithChineseInLA creates one MCP server hosting both Xiaohongshu
 // and ChineseInLA tools. Each service keeps its own browser configuration.
 func NewAppServerWithChineseInLA(xiaohongshuService *XiaohongshuService, chineseInLAService ChineseInLAService, authToken string) *AppServer {
+	return NewAppServerWithServices(xiaohongshuService, chineseInLAService, nil, authToken)
+}
+
+func NewAppServerWithServices(xiaohongshuService *XiaohongshuService, chineseInLAService ChineseInLAService, redditService RedditService, authToken string) *AppServer {
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
 		chineseInLAService: chineseInLAService,
+		redditService:      redditService,
 		authToken:          authToken,
 	}
 

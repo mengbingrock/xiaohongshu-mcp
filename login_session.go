@@ -51,6 +51,7 @@ type LoginSessionStatus struct {
 }
 
 type loginCodeSubmitter func(context.Context, string) error
+type loginCodeRequester func(context.Context) (clicked string, phone string, err error)
 type loginChallengeCapture func(context.Context) ([]byte, error)
 
 // loginSession 持有一次二维码登录所对应的浏览器操作。
@@ -60,6 +61,7 @@ type loginSession struct {
 	id               string
 	expiresAt        time.Time
 	cancel           context.CancelFunc
+	requestCode      loginCodeRequester
 	submit           loginCodeSubmitter
 	captureChallenge loginChallengeCapture
 	opMu             sync.Mutex
@@ -136,6 +138,18 @@ func (l *loginSessions) start(cancel context.CancelFunc, submit loginCodeSubmitt
 		previousCancel()
 	}
 	return session, nil
+}
+
+// extend pushes a session's expiry out (never in). Used once the QR has been
+// scanned: the 4-minute window is sized for the scan, not for waiting on an
+// SMS code and typing it, and submitCode refuses codes after expiresAt.
+func (l *loginSessions) extend(session *loginSession, until time.Time) time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if until.After(session.expiresAt) {
+		session.expiresAt = until
+	}
+	return session.expiresAt
 }
 
 func (l *loginSessions) observe(session *loginSession, state LoginSessionState, lastError string) {
@@ -223,6 +237,37 @@ func (l *loginSessions) captureSecurityChallenge(ctx context.Context, sessionID 
 		session.lastError = ""
 	}
 	return session.snapshot(), nil
+}
+
+// resendCode clicks the SMS modal's resend control for the current session.
+// It is only meaningful while the page is asking for a code.
+func (l *loginSessions) resendCode(ctx context.Context, sessionID string) (LoginSessionStatus, string, string, error) {
+	l.mu.Lock()
+	if l.current == nil || l.current.id != sessionID {
+		l.mu.Unlock()
+		return LoginSessionStatus{}, "", "", ErrLoginSessionNotFound
+	}
+	session := l.current
+	if time.Now().After(session.expiresAt) || session.cancel == nil || session.requestCode == nil {
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, "", "", ErrLoginSessionClosed
+	}
+	if session.state != LoginSessionOTPRequired {
+		status := session.snapshot()
+		l.mu.Unlock()
+		return status, "", "", ErrLoginCodeNotRequired
+	}
+	request := session.requestCode
+	l.mu.Unlock()
+
+	session.opMu.Lock()
+	clicked, phone, err := request(ctx)
+	session.opMu.Unlock()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return session.snapshot(), clicked, phone, err
 }
 
 func (l *loginSessions) submitCode(ctx context.Context, sessionID, code string) (LoginSessionStatus, error) {
