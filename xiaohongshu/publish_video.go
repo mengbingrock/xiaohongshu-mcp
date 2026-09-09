@@ -177,7 +177,7 @@ func submitPublishVideo(ctx context.Context, page *rod.Page, trace *publishTrace
 	trace.Capture(page, "publish_clicked")
 
 	// 校验发布真的成功（成功跳转离开发布页），未跳转判失败——消除假成功
-	if err := waitPublishSuccess(page, 15*time.Second); err != nil {
+	if err := waitPublishSuccess(page, trace, 15*time.Second); err != nil {
 		return err
 	}
 	trace.Capture(page, "publish_success_confirmed")

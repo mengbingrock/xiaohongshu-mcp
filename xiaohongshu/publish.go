@@ -695,7 +695,7 @@ func submitPublish(ctx context.Context, page *rod.Page, trace *publishTrace, tit
 
 	// 校验发布真的成功：成功后创作平台会跳转离开发布页；未跳转则判定失败，
 	// 消除"点了发布按钮就算成功"的假阳性。
-	if err := waitPublishSuccess(page, 15*time.Second); err != nil {
+	if err := waitPublishSuccess(page, trace, 15*time.Second); err != nil {
 		return err
 	}
 	trace.Capture(page, "publish_success_confirmed")
@@ -737,9 +737,11 @@ func getTitleElement(page *rod.Page, timeout time.Duration) (*rod.Element, error
 }
 
 // waitPublishSuccess 轮询等待发布成功的信号：小红书发布成功后会跳转离开发布表单页
-// （URL 不再含 /publish/publish）。超时仍未跳转 → 判定发布失败。
-func waitPublishSuccess(page *rod.Page, timeout time.Duration) error {
+// （URL 不再含 /publish/publish），或页面弹出"发布成功"提示。超时仍未确认 → 判定失败，
+// 并把期间出现过的 toast / 弹窗文案带进错误信息（toast 只停留几秒，事后截图看不到）。
+func waitPublishSuccess(page *rod.Page, trace *publishTrace, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var notices []string
 	for {
 		if err := checkCreatorSession(page); err != nil {
 			return err
@@ -749,11 +751,67 @@ func waitPublishSuccess(page *rod.Page, timeout time.Duration) error {
 			slog.Info("发布成功，已跳转离开发布页", "url", info.URL)
 			return nil
 		}
+
+		for _, text := range collectPageNotices(page) {
+			if strings.Contains(text, "发布成功") {
+				slog.Info("发布成功，页面提示确认", "notice", text)
+				return nil
+			}
+			if !containsString(notices, text) {
+				notices = append(notices, text)
+				slog.Warn("发布后页面出现提示", "notice", text)
+				trace.Capture(page, "publish_notice")
+			}
+		}
+
 		if time.Now().After(deadline) {
-			return errors.New("发布未确认成功：点击发布后未跳转离开发布页（" + publishPageSnapshot(page) + "）")
+			msg := "发布未确认成功：点击发布后未跳转离开发布页（" + publishPageSnapshot(page) + "）"
+			if len(notices) > 0 {
+				msg += "，页面提示: " + strings.Join(notices, " | ")
+			}
+			return errors.New(msg)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// collectPageNotices 摘取当前可见的 toast / 弹窗文案，用于解释发布为何没有成功。
+func collectPageNotices(page *rod.Page) []string {
+	selectors := []string{
+		".d-toast", ".d-message", `[class*="toast"]`,
+		".d-modal", `[role="dialog"]`, `[class*="dialog"]`,
+	}
+	var texts []string
+	for _, selector := range selectors {
+		elems, err := page.Elements(selector)
+		if err != nil {
+			continue
+		}
+		for _, elem := range elems {
+			if !isElementVisible(elem) {
+				continue
+			}
+			text, err := elem.Text()
+			if err != nil {
+				continue
+			}
+			text = strings.Join(strings.Fields(text), " ")
+			if text == "" || len(text) > 300 || containsString(texts, text) {
+				continue
+			}
+			texts = append(texts, text)
+		}
+	}
+	return texts
+}
+
+func containsString(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 type publishButton struct {
