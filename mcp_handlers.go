@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
@@ -220,6 +221,21 @@ func (s *AppServer) handleResendLoginCode(ctx context.Context, sessionID string)
 }
 
 // handleDeleteCookies 处理删除 cookies 请求，用于登录重置
+func (s *AppServer) handleSetProxy(args SetProxyArgs) *MCPToolResult {
+	if err := configs.SetRuntimeProxy(args.ProxyURL); err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{Type: "text", Text: "设置代理失败: " + err.Error()}},
+			IsError: true,
+		}
+	}
+	if configs.Proxy() == "" {
+		logrus.Info("MCP: 出口代理已清除，恢复直连")
+	} else {
+		logrus.Infof("MCP: 出口代理已设置: %s", configs.Proxy())
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: `{"status":"configured"}`}}}
+}
+
 func (s *AppServer) handleDeleteCookies(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 删除 cookies，重置登录状态")
 

@@ -20,6 +20,11 @@ type LoginSessionArgs struct {
 	SessionID string `json:"session_id" jsonschema:"get_login_qrcode 返回的登录会话 ID"`
 }
 
+// SetProxyArgs are the set_proxy parameters.
+type SetProxyArgs struct {
+	ProxyURL string `json:"proxy_url" jsonschema:"Postiz 租约返回的租户专属回环 HTTP 代理地址（http://127.0.0.1:port）；空串恢复直连"`
+}
+
 // LoginQrcodeArgs are the get_login_qrcode parameters.
 type LoginQrcodeArgs struct {
 	Visible bool `json:"visible,omitempty" jsonschema:"true 时以可见（非无头）浏览器打开登录页，便于通过 VNC 人工扫码/输入验证码；默认 false 保持无头二维码模式"`
@@ -276,6 +281,18 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		withPanicRecovery("resend_login_code", func(ctx context.Context, req *mcp.CallToolRequest, args LoginSessionArgs) (*mcp.CallToolResult, any, error) {
 			result := appServer.handleResendLoginCode(ctx, args.SessionID)
 			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	// 工具 2.5: 运行期设置出口代理（Postiz 本地连接器租约）
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "set_proxy",
+			Description: "设置小红书浏览器的出口代理（仅接受 127.0.0.1 上的 HTTP 回环代理，空串恢复直连）。Postiz 在取得组织的本地出口租约后自动调用，之后打开的登录/发布浏览器都经该代理访问小红书。",
+			Annotations: &mcp.ToolAnnotations{Title: "Configure Egress Proxy"},
+		},
+		withPanicRecovery("set_proxy", func(_ context.Context, _ *mcp.CallToolRequest, args SetProxyArgs) (*mcp.CallToolResult, any, error) {
+			return convertToMCPResult(appServer.handleSetProxy(args)), nil, nil
 		}),
 	)
 

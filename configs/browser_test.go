@@ -28,6 +28,28 @@ func TestFingerprintSeedFromEnv(t *testing.T) {
 	}
 }
 
+func TestSetRuntimeProxy(t *testing.T) {
+	t.Cleanup(func() { SetProxy("") })
+
+	assert.NoError(t, SetRuntimeProxy("http://127.0.0.1:18443"))
+	assert.Equal(t, "http://127.0.0.1:18443", Proxy())
+
+	assert.NoError(t, SetRuntimeProxy("  "))
+	assert.Equal(t, "", Proxy(), "空串表示直连")
+
+	for _, bad := range []string{
+		"socks5://127.0.0.1:1080",
+		"http://10.0.0.1:18443",
+		"http://127.0.0.1:80",
+		"http://user:pw@127.0.0.1:18443",
+		"http://127.0.0.1:18443/path",
+		"not a url",
+	} {
+		assert.Error(t, SetRuntimeProxy(bad), bad)
+		assert.Equal(t, "", Proxy(), "非法值不得覆盖当前代理")
+	}
+}
+
 func TestProxyFromEnv(t *testing.T) {
 	t.Run("未设为空", func(t *testing.T) {
 		t.Setenv("XHS_PROXY", "")

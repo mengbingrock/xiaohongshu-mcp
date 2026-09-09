@@ -1,6 +1,9 @@
 package configs
 
 import (
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -54,6 +57,27 @@ func SetProxy(p string) {
 
 func Proxy() string {
 	return proxy
+}
+
+// SetRuntimeProxy 运行期切换小红书浏览器的出口代理（Postiz 拿到租约后调用）。
+// 只接受 127.0.0.1 上的 HTTP 回环代理（非特权端口、无凭据/路径），空串表示直连。
+// 浏览器按操作即建即销，改动对下一次打开的浏览器生效。
+func SetRuntimeProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		proxy = ""
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || strings.ToLower(parsed.Scheme) != "http" || parsed.Hostname() != "127.0.0.1" {
+		return errors.New("runtime proxy must be an HTTP URL on 127.0.0.1")
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1024 || port > 65535 || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("runtime proxy must contain only a valid loopback host and unprivileged port")
+	}
+	proxy = fmt.Sprintf("http://127.0.0.1:%d", port)
+	return nil
 }
 
 // ProxyFromEnv 从 XHS_PROXY 环境变量读取代理地址。env 读取集中在配置层。
