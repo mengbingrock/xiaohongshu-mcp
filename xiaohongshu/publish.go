@@ -62,6 +62,12 @@ const (
 
 	// contentElemTimeout 查找正文输入框的轮询窗口
 	contentElemTimeout = 10 * time.Second
+
+	// tagSuggestionTimeout bounds an optional UI enhancement. RedNote does not
+	// always return a suggestion menu for every hashtag, especially after one
+	// topic has already been selected. Letting Element inherit the page's
+	// five-minute publish timeout turns that normal absence into a failed post.
+	tagSuggestionTimeout = 3 * time.Second
 )
 
 func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
@@ -1130,20 +1136,23 @@ func inputTag(ctx context.Context, contentElem *rod.Element, tag string) error {
 	time.Sleep(1 * time.Second) // 技术等待：等联想结果刷新
 
 	page := contentElem.Page()
-	topicContainer, err := page.Element("#creator-editor-topic-container")
+	topicContainer, err := page.Timeout(tagSuggestionTimeout).Element("#creator-editor-topic-container")
 	if err != nil || topicContainer == nil {
 		slog.Warn("未找到标签联想下拉框，直接输入空格", "tag", tag)
 		return humanize.Type(ctx, contentElem, " ")
 	}
 
-	firstItem, err := topicContainer.Element(".item")
+	firstItem, err := topicContainer.Timeout(tagSuggestionTimeout).Element(".item")
 	if err != nil || firstItem == nil {
 		slog.Warn("未找到标签联想选项，直接输入空格", "tag", tag)
 		return humanize.Type(ctx, contentElem, " ")
 	}
 
-	if err := humanize.Click(firstItem); err != nil {
-		return errors.Wrap(err, "点击标签联想选项失败")
+	if err := humanize.Click(firstItem.Timeout(tagSuggestionTimeout)); err != nil {
+		// Suggestions are best-effort. If a stale or covered result disappears
+		// while we move the pointer, keep the already typed #tag as plain text.
+		slog.Warn("标签联想选项不可点击，直接输入空格", "tag", tag, "error", err)
+		return humanize.Type(ctx, contentElem, " ")
 	}
 	slog.Info("成功点击标签联想选项", "tag", tag)
 	time.Sleep(500 * time.Millisecond) // 技术等待：等标签处理完成
