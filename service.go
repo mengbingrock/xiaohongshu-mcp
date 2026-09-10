@@ -146,6 +146,12 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 		creatorLoggedIn, err := loginAction.CheckCreatorLoginStatus(ctx)
 		if err != nil {
+			// 发布页白屏只说明页面没渲染出来（代理慢、静态资源被拦），不是登录失效：
+			// 唯一权威的失效信号是被重定向到登录页。主站已确认登录，这里不把白屏当作失败。
+			if errors.Is(err, xiaohongshu.ErrCreatorPageBlank) {
+				logrus.Warnf("创作中心发布页白屏，沿用主站登录判定（已登录）: %v", err)
+				return response, nil
+			}
 			return nil, err
 		}
 		response.IsLoggedIn = creatorLoggedIn

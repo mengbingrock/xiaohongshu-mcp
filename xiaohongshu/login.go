@@ -354,12 +354,13 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 // operations. A normal www.xiaohongshu.com session can remain valid after the
 // creator session has started redirecting to /login with redirectReason=401.
 func (a *LoginAction) CheckCreatorLoginStatus(ctx context.Context) (bool, error) {
-	pp := a.page.Context(ctx).Timeout(15 * time.Second)
+	// 经本地出口代理或访问 INTL 创作中心时首屏明显更慢，给足时间再下结论。
+	pp := a.page.Context(ctx).Timeout(30 * time.Second)
 	if err := pp.Navigate(CurrentSite().PublishURL); err != nil {
 		return false, errors.Wrap(err, "navigate to creator publish page failed")
 	}
 
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := checkCreatorSession(pp); err != nil {
 			if errors.Is(err, ErrCreatorSessionExpired) {
