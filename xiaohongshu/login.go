@@ -318,8 +318,9 @@ func verificationSubmitEnabled(className string, disabled, ariaDisabled *string)
 }
 
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
-	// 加超时保护：只是查登录态的快速检查，不应无限挂（登录扫码的等待在 Login/WaitForLogin 里）
-	pp := a.page.Context(ctx).Timeout(30 * time.Second)
+	// 加超时保护：只是查登录态的快速检查，不应无限挂（登录扫码的等待在 Login/WaitForLogin 里）。
+	// 经代理访问 INTL 首页 load 事件可能超过 30s，放宽到 60s。
+	pp := a.page.Context(ctx).Timeout(60 * time.Second)
 	trace := newPublishTrace("login-check")
 	trace.AttachNetwork(pp)
 	pp.MustNavigate(CurrentSite().HomeURL).MustWaitLoad()
@@ -355,12 +356,12 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 // creator session has started redirecting to /login with redirectReason=401.
 func (a *LoginAction) CheckCreatorLoginStatus(ctx context.Context) (bool, error) {
 	// 经本地出口代理或访问 INTL 创作中心时首屏明显更慢，给足时间再下结论。
-	pp := a.page.Context(ctx).Timeout(30 * time.Second)
+	pp := a.page.Context(ctx).Timeout(60 * time.Second)
 	if err := pp.Navigate(CurrentSite().PublishURL); err != nil {
 		return false, errors.Wrap(err, "navigate to creator publish page failed")
 	}
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := checkCreatorSession(pp); err != nil {
 			if errors.Is(err, ErrCreatorSessionExpired) {

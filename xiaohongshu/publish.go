@@ -145,7 +145,9 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 // for the note editor after the last image finishes uploading, and the document
 // is briefly empty while that re-render happens. Sampling once inside that gap
 // reports a healthy, logged-in session as expired.
-const sessionSettleWindow = 6 * time.Second
+// 经本地出口代理（~400KB/s）访问 INTL 创作中心时，首屏要 15–25s 才渲染出来，
+// 6s 会把慢当成白屏；真正的失效（跳转登录页）在等待期间会被立刻识别，不受影响。
+const sessionSettleWindow = 30 * time.Second
 
 // ErrCreatorPageBlank means the publish page stopped rendering. It is
 // deliberately distinct from ErrCreatorSessionExpired: a blank document proves
