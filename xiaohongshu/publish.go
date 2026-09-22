@@ -75,6 +75,10 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	pp := page.Timeout(300 * time.Second)
 	trace.AttachNetwork(pp)
 
+	if err := ensureCreatorSession(pp); err != nil {
+		return nil, err
+	}
+
 	if err := pp.Navigate(CurrentSite().PublishURL); err != nil {
 		trace.Capture(pp, "navigation_failed")
 		return nil, errors.Wrap(err, "导航到发布页面失败")
