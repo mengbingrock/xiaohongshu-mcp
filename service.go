@@ -78,6 +78,7 @@ type PublishVideoRequest struct {
 	Title      string   `json:"title" binding:"required"`
 	Content    string   `json:"content" binding:"required"`
 	Video      string   `json:"video" binding:"required"`
+	Cover      string   `json:"cover,omitempty"` // 自定义封面本地图片路径，为空则用小红书默认首帧
 	Tags       []string `json:"tags,omitempty"`
 	ScheduleAt string   `json:"schedule_at,omitempty"` // 定时发布时间，ISO8601格式，为空则立即发布
 	Visibility string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
@@ -549,6 +550,7 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 		Content:      req.Content,
 		Tags:         req.Tags,
 		VideoPath:    req.Video,
+		CoverPath:    req.Cover,
 		ScheduleTime: scheduleTime,
 		Visibility:   req.Visibility,
 		Products:     req.Products,

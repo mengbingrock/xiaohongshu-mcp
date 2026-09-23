@@ -72,17 +72,39 @@ func ProbeCoverUI(ctx context.Context, page *rod.Page, videoPath string) (report
 	         ' text=' + JSON.stringify((e.textContent||'').trim().slice(0, 30)))
 	    .join('\n'); }`))
 
-	say("\n== clicking the cover thumbnail")
-	say("%s", evalString(pp, `() => { const f = `+coverContainerJS+`; const n = f();
-	  if (!n) return 'no cover section';
-	  const img = n.querySelector('img');
-	  if (!img) return 'no img in cover section';
-	  const t = img.closest('div') || img;
+	say("\n== clicking 编辑封面 (.cover-edit-entry)")
+	say("%s", evalString(pp, `() => {
+	  const e = document.querySelector('.cover-edit-entry')
+	    || [...document.querySelectorAll('div,span,button')].find(
+	         x => (x.textContent||'').trim() === '编辑封面');
+	  if (!e) return 'no 编辑封面 entry found';
+	  e.click();
+	  return 'clicked <' + e.tagName + ' class=' + JSON.stringify(e.className.toString()) + '>'; }`))
+	time.Sleep(6 * time.Second)
+
+	say("\n== switching to the 上传封面 tab")
+	say("%s", evalString(pp, `() => {
+	  const t = [...document.querySelectorAll('.d-tabs-header')].find(
+	    e => (e.textContent||'').trim() === '上传封面');
+	  if (!t) return 'no 上传封面 tab';
 	  t.click();
-	  return 'clicked <' + t.tagName + ' class=' + JSON.stringify(t.className.toString()) + '>'; }`))
+	  return 'clicked the 上传封面 tab'; }`))
 	time.Sleep(5 * time.Second)
 
-	say("\n== file inputs after opening the editor: %d", countSel(pp, "input[type='file']"))
+	say("\n== file inputs after switching tabs")
+	say("%s", evalString(pp, `() => [...document.querySelectorAll('input[type=file]')]
+	  .map((e,i) => i + ': class=' + JSON.stringify(e.className.toString()) +
+	       ' accept=' + JSON.stringify(e.getAttribute('accept')||'') +
+	       ' visible=' + (e.offsetParent !== null) +
+	       ' parent=' + JSON.stringify(e.parentElement ? e.parentElement.className.toString() : ''))
+	  .join('\n')`))
+
+	say("\n== the 上传封面 pane DOM")
+	say("%s", evalString(pp, `() => {
+	  const panes = [...document.querySelectorAll('.d-tabs-pane')].filter(p => p.offsetParent !== null);
+	  return panes.map(p => 'name=' + p.getAttribute('name') + '\n' + p.outerHTML.slice(0, 4000)).join('\n---- pane ----\n')
+	    || '<<no visible pane>>'; }`))
+
 	say("\n== visible modal / drawer DOM (trimmed)")
 	say("%s", evalString(pp, `() => {
 	  const sel = '.d-modal,.d-drawer,[class*=modal],[class*=dialog],[role=dialog],[class*=drawer]';
@@ -90,6 +112,14 @@ func ProbeCoverUI(ctx context.Context, page *rod.Page, videoPath string) (report
 	  if (!ms.length) return '<<no visible modal>>';
 	  return ms.map(m => m.outerHTML.slice(0, 8000)).join('\n---- next ----\n');
 	}`))
+
+	say("\n== every file input on the page (after opening the editor)")
+	say("%s", evalString(pp, `() => [...document.querySelectorAll('input[type=file]')]
+	  .map((e,i) => i + ': class=' + JSON.stringify(e.className.toString()) +
+	       ' accept=' + JSON.stringify(e.getAttribute('accept')||'') +
+	       ' visible=' + (e.offsetParent !== null) +
+	       ' ancestors=' + JSON.stringify([...(function*(n){let p=e.parentElement;let c=0;while(p&&c++<4){yield p.className.toString();p=p.parentElement;}})()].join(' < ')))
+	  .join('\n')`))
 
 	say("\n== visible clickable labels on the page")
 	say("%s", evalString(pp, `() => [...document.querySelectorAll('button,[role=button],[class*=tab],[class*=btn]')]

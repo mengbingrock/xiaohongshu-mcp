@@ -360,15 +360,17 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 		}
 	}
 
+	coverPath, _ := args["cover"].(string)
 	scheduleAt, _ := args["schedule_at"].(string)
 	visibility := parseVisibility(args)
 
-	logrus.Infof("MCP: 发布视频 - 标题: %s, 标签数量: %d, 定时: %s, visibility: %s, 商品: %v", title, len(tags), scheduleAt, visibility, products)
+	logrus.Infof("MCP: 发布视频 - 标题: %s, 标签数量: %d, 定时: %s, visibility: %s, 封面: %q, 商品: %v", title, len(tags), scheduleAt, visibility, coverPath, products)
 
 	req := &PublishVideoRequest{
 		Title:      title,
 		Content:    content,
 		Video:      videoPath,
+		Cover:      coverPath,
 		Tags:       tags,
 		ScheduleAt: scheduleAt,
 		Visibility: visibility,
