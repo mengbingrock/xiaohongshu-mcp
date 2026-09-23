@@ -70,8 +70,13 @@ func (p *PublishAction) PublishVideo(ctx context.Context, content PublishVideoCo
 		return errors.New("视频不能为空")
 	}
 
-	// 重设超时：.Context(ctx) 会替换掉 NewPublishVideoAction 里 Timeout(300s) 的 deadline
-	page := p.page.Context(ctx).Timeout(300 * time.Second)
+	// 重设超时：.Context(ctx) 会替换掉 NewPublishVideoAction 里 Timeout(300s) 的 deadline。
+	// 带自定义封面时要多等编辑器把视频加载完，整体放宽。
+	overall := 300 * time.Second
+	if content.CoverPath != "" {
+		overall = 10 * time.Minute
+	}
+	page := p.page.Context(ctx).Timeout(overall)
 	defer func() {
 		if err != nil {
 			p.trace.Capture(page, "publish_failed")
@@ -83,9 +88,8 @@ func (p *PublishAction) PublishVideo(ctx context.Context, content PublishVideoCo
 	}
 	p.trace.Capture(page, "video_uploaded")
 
-	// A requested cover must either be applied or fail the publish: silently
-	// falling back to Xiaohongshu's first frame would ship a note whose cover
-	// is not the one that was asked for.
+	// 要了封面就必须设上，设不上直接让发布失败：悄悄退回小红书的首帧，
+	// 发出去的笔记封面就不是用户要的那张了。
 	if content.CoverPath != "" {
 		if err := setVideoCover(page, content.CoverPath); err != nil {
 			p.trace.Capture(page, "cover_failed")
@@ -131,17 +135,24 @@ func uploadVideo(page *rod.Page, videoPath string) error {
 	return nil
 }
 
+const (
+	// coverModalSelector 封面编辑弹窗，它没有 d-modal-footer，按钮都在内容区里
+	coverModalSelector = ".main-cover-editor-modal"
+	// uploadedCoverSelector 图片上传成功后，"上传"槽位会变成这个缩略图按钮
+	uploadedCoverSelector = "button.uploaded-thumbnail"
+)
+
 // setVideoCover 用本地图片替换默认首帧封面。
 //
-// 创作中心的封面控件：点"编辑封面"(.cover-edit-entry) 打开 d-modal，模态里有
-// "截取封面"/"上传封面" 两个 tab，切到"上传封面"后由其中的 file input 接收图片，
-// 最后点页脚的"确定"(.btn-confirm) 应用。每一步都限时并显式校验，失败即报错。
+// 创作中心的封面控件：hover 封面预览区让"编辑封面"(.cover-edit-entry) 显示出来，
+// 点开后是封面编辑器弹窗，弹窗底部"上传"按钮后面挂着只收图片的 file input，
+// 最后点右下角"完成"应用。每一步都限时并显式校验，失败即报错。
 func setVideoCover(page *rod.Page, coverPath string) error {
 	if _, err := os.Stat(coverPath); err != nil {
 		return errors.Wrapf(err, "封面文件不存在或不可访问: %s", coverPath)
 	}
 
-	pp := page.Timeout(3 * time.Minute)
+	pp := page.Timeout(8 * time.Minute)
 
 	// "编辑封面"一直在 DOM 里，但要 hover 封面预览区才显示出来
 	entry, err := pp.Timeout(30 * time.Second).Element(".cover-edit-entry")
@@ -158,21 +169,11 @@ func setVideoCover(page *rod.Page, coverPath string) error {
 		return errors.Wrap(err, "点击\"编辑封面\"失败")
 	}
 
-	// 等模态出现（页脚的确定按钮是它就绪的标志）
-	if err := waitForSelector(pp, ".d-modal-footer .btn-confirm", 30*time.Second); err != nil {
+	if err := waitForSelector(pp, coverModalSelector, 30*time.Second); err != nil {
 		return errors.Wrap(err, "封面编辑弹窗未打开")
 	}
 
-	// 切到"上传封面"
-	tab, err := pp.Timeout(20*time.Second).ElementR(".d-tabs-header", "上传封面")
-	if err != nil || tab == nil {
-		return errors.New("未找到\"上传封面\"标签页")
-	}
-	if err := tab.Timeout(20*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return errors.Wrap(err, "切换到\"上传封面\"失败")
-	}
-
-	// 弹窗里接收图片的 input：按 accept 认图片，排除外层那个只收视频的 .upload-input
+	// 弹窗里接收图片的 input：按 accept 认图片，排除外层那个只收视频的同名 input
 	input, err := findCoverFileInput(pp, 20*time.Second)
 	if err != nil {
 		return err
@@ -181,30 +182,37 @@ func setVideoCover(page *rod.Page, coverPath string) error {
 		return errors.Wrap(err, "提交封面图片失败")
 	}
 
-	// 图片进裁剪器后"确定"才有意义：上传成功时 .center-box 由隐藏变为可见，
-	// cropperjs 也会建出 .cropper-container。任一出现即认为图片已就位。
-	if err := waitCoverImageLoaded(pp, 60*time.Second); err != nil {
-		return err
+	// 上传成功后"上传"位置会变成一张已上传封面的缩略图，点它选中作为封面
+	if err := waitForSelector(pp, uploadedCoverSelector, 2*time.Minute); err != nil {
+		return errors.Wrap(err, "封面图片未上传成功")
+	}
+	thumb, err := pp.Timeout(20 * time.Second).Element(uploadedCoverSelector)
+	if err != nil || thumb == nil {
+		return errors.New("未找到已上传的封面缩略图")
+	}
+	if err := thumb.Timeout(20*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "选中已上传封面失败")
 	}
 
-	confirm, err := pp.Timeout(20 * time.Second).Element(".d-modal-footer .btn-confirm")
-	if err != nil || confirm == nil {
-		return errors.New("未找到封面弹窗的\"确定\"按钮")
+	// 视频在弹窗里还没加载完时"完成"是禁用的，等它可点再点
+	done, err := waitCoverDoneEnabled(pp, 3*time.Minute)
+	if err != nil {
+		return err
 	}
-	if err := confirm.Timeout(20*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return errors.Wrap(err, "点击封面\"确定\"失败")
+	if err := done.Timeout(20*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "点击封面\"完成\"失败")
 	}
 
 	// 弹窗关闭才算应用成功
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		has, _, err := pp.Has(".d-modal-footer .btn-confirm")
+		has, _, err := pp.Has(coverModalSelector)
 		if err == nil && !has {
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return errors.New("点击\"确定\"后封面弹窗未关闭，封面可能未应用")
+	return errors.New("点击\"完成\"后封面弹窗未关闭，封面可能未应用")
 }
 
 // hoverCoverPreview 把"编辑封面"浮层 hover 出来。
@@ -235,24 +243,28 @@ func hoverCoverPreview(page *rod.Page, entry *rod.Element) error {
 	return errors.New("无法 hover 封面预览区，\"编辑封面\"不会显示")
 }
 
-// waitCoverImageLoaded 等封面图片进入弹窗的裁剪器。
-func waitCoverImageLoaded(page *rod.Page, timeout time.Duration) error {
+// waitCoverDoneEnabled 等封面弹窗的"完成"按钮变为可点。
+//
+// 视频要先在弹窗里加载完，按钮才从 disabled 变回可点；禁用态下 pointer-events
+// 是 none，直接点会被 rod 挡下来。
+func waitCoverDoneEnabled(page *rod.Page, timeout time.Duration) (*rod.Element, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if has, _, err := page.Has(".d-tabs-pane[name=uploadTab] .cropper-container"); err == nil && has {
-			return nil
-		}
-		if has, box, err := page.Has(".d-tabs-pane[name=uploadTab] .center-box"); err == nil && has {
-			if visible, verr := box.Visible(); verr == nil && visible {
-				return nil
+		done, err := page.Timeout(10*time.Second).ElementR(coverModalSelector+" button", "完成")
+		if err == nil && done != nil {
+			class, cerr := done.Attribute("class")
+			if cerr == nil && (class == nil || !strings.Contains(*class, "disabled")) {
+				return done, nil
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(time.Second)
 	}
-	return errors.New("封面图片未加载到裁剪器")
+	return nil, errors.New("封面弹窗的\"完成\"按钮一直不可点，视频可能没在弹窗里加载完")
 }
 
 // findCoverFileInput 找弹窗里那个收图片的 file input。
+//
+// 页面上有两个 .upload-input：外层收视频，弹窗里这个收图片，靠 accept 区分。
 func findCoverFileInput(page *rod.Page, timeout time.Duration) (*rod.Element, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -261,11 +273,6 @@ func findCoverFileInput(page *rod.Page, timeout time.Duration) (*rod.Element, er
 			for _, el := range els {
 				accept, _ := el.Attribute("accept")
 				if accept != nil && strings.Contains(strings.ToLower(*accept), "image") {
-					return el, nil
-				}
-				// accept 没写全时，退而求其次：不是外层收视频的那个就用它
-				class, _ := el.Attribute("class")
-				if accept == nil && (class == nil || !strings.Contains(*class, "upload-input")) {
 					return el, nil
 				}
 			}
