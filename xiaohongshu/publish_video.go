@@ -135,19 +135,26 @@ func uploadVideo(page *rod.Page, videoPath string) error {
 //
 // 创作中心的封面控件：点"编辑封面"(.cover-edit-entry) 打开 d-modal，模态里有
 // "截取封面"/"上传封面" 两个 tab，切到"上传封面"后由其中的 file input 接收图片，
-// 最后点页脚的"确定"(.btn-confirm) 应用。每一步都显式校验，失败即报错。
+// 最后点页脚的"确定"(.btn-confirm) 应用。每一步都限时并显式校验，失败即报错。
 func setVideoCover(page *rod.Page, coverPath string) error {
 	if _, err := os.Stat(coverPath); err != nil {
 		return errors.Wrapf(err, "封面文件不存在或不可访问: %s", coverPath)
 	}
 
-	pp := page.Timeout(2 * time.Minute)
+	pp := page.Timeout(3 * time.Minute)
 
-	entry, err := pp.Element(".cover-edit-entry")
+	// "编辑封面"一直在 DOM 里，但要 hover 封面预览区才显示出来
+	entry, err := pp.Timeout(30 * time.Second).Element(".cover-edit-entry")
 	if err != nil || entry == nil {
 		return errors.New("未找到\"编辑封面\"入口")
 	}
-	if err := entry.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := hoverCoverPreview(pp, entry); err != nil {
+		return err
+	}
+	if err := entry.Timeout(20 * time.Second).WaitVisible(); err != nil {
+		return errors.Wrap(err, "\"编辑封面\"按钮未显示")
+	}
+	if err := entry.Timeout(20*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errors.Wrap(err, "点击\"编辑封面\"失败")
 	}
 
@@ -157,17 +164,13 @@ func setVideoCover(page *rod.Page, coverPath string) error {
 	}
 
 	// 切到"上传封面"
-	switched, err := pp.Eval(`() => {
-	  const t = [...document.querySelectorAll('.d-tabs-header')].find(
-	    e => (e.textContent||'').trim() === '上传封面');
-	  if (!t) return false;
-	  t.click();
-	  return true;
-	}`)
-	if err != nil || !switched.Value.Bool() {
+	tab, err := pp.Timeout(20*time.Second).ElementR(".d-tabs-header", "上传封面")
+	if err != nil || tab == nil {
 		return errors.New("未找到\"上传封面\"标签页")
 	}
-	time.Sleep(2 * time.Second)
+	if err := tab.Timeout(20*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "切换到\"上传封面\"失败")
+	}
 
 	// 弹窗里接收图片的 input：按 accept 认图片，排除外层那个只收视频的 .upload-input
 	input, err := findCoverFileInput(pp, 20*time.Second)
@@ -178,46 +181,75 @@ func setVideoCover(page *rod.Page, coverPath string) error {
 		return errors.Wrap(err, "提交封面图片失败")
 	}
 
-	// 图片进裁剪器后"确定"才有意义：上传成功时 .center-box 由 display:none 变为可见，
+	// 图片进裁剪器后"确定"才有意义：上传成功时 .center-box 由隐藏变为可见，
 	// cropperjs 也会建出 .cropper-container。任一出现即认为图片已就位。
-	deadlineCrop := time.Now().Add(60 * time.Second)
-	loaded := false
-	for time.Now().Before(deadlineCrop) {
-		ok, err := pp.Eval(`() => {
-		  const box = document.querySelector('.d-tabs-pane[name=uploadTab] .center-box');
-		  const boxShown = !!box && box.offsetParent !== null;
-		  const cropper = !!document.querySelector('.d-tabs-pane[name=uploadTab] .cropper-container');
-		  return boxShown || cropper;
-		}`)
-		if err == nil && ok.Value.Bool() {
-			loaded = true
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
+	if err := waitCoverImageLoaded(pp, 60*time.Second); err != nil {
+		return err
 	}
-	if !loaded {
-		return errors.New("封面图片未加载到裁剪器")
-	}
-	time.Sleep(2 * time.Second)
 
-	confirm, err := pp.Element(".d-modal-footer .btn-confirm")
+	confirm, err := pp.Timeout(20 * time.Second).Element(".d-modal-footer .btn-confirm")
 	if err != nil || confirm == nil {
 		return errors.New("未找到封面弹窗的\"确定\"按钮")
 	}
-	if err := confirm.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := confirm.Timeout(20*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errors.Wrap(err, "点击封面\"确定\"失败")
 	}
 
 	// 弹窗关闭才算应用成功
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		open, err := pp.Eval(`() => !!document.querySelector('.d-modal-footer .btn-confirm')`)
-		if err == nil && !open.Value.Bool() {
+		has, _, err := pp.Has(".d-modal-footer .btn-confirm")
+		if err == nil && !has {
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	return errors.New("点击\"确定\"后封面弹窗未关闭，封面可能未应用")
+}
+
+// hoverCoverPreview 把"编辑封面"浮层 hover 出来。
+//
+// 浮层本身不可交互，直接 Click 会卡在 rod 的 WaitInteractable 上直到页面超时，
+// 所以从它往上找第一个能 hover 的祖先容器（即封面预览区）。
+func hoverCoverPreview(page *rod.Page, entry *rod.Element) error {
+	// 封面预览区就是那张默认首帧缩略图
+	if preview, err := page.Timeout(5 * time.Second).Element(".default.row"); err == nil && preview != nil {
+		if err := preview.Timeout(5 * time.Second).Hover(); err == nil {
+			return nil
+		}
+	}
+
+	// 兜底：从浮层往上找第一个能 hover 的祖先。只找三层，避免 hover 到整个版块
+	// 上去——那样鼠标落在缩略图之外，浮层同样不会出现。
+	node := entry
+	for i := 0; i < 3; i++ {
+		parent, err := node.Parent()
+		if err != nil || parent == nil {
+			break
+		}
+		node = parent
+		if err := node.Timeout(5 * time.Second).Hover(); err == nil {
+			return nil
+		}
+	}
+	return errors.New("无法 hover 封面预览区，\"编辑封面\"不会显示")
+}
+
+// waitCoverImageLoaded 等封面图片进入弹窗的裁剪器。
+func waitCoverImageLoaded(page *rod.Page, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if has, _, err := page.Has(".d-tabs-pane[name=uploadTab] .cropper-container"); err == nil && has {
+			return nil
+		}
+		if has, box, err := page.Has(".d-tabs-pane[name=uploadTab] .center-box"); err == nil && has {
+			if visible, verr := box.Visible(); verr == nil && visible {
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return errors.New("封面图片未加载到裁剪器")
 }
 
 // findCoverFileInput 找弹窗里那个收图片的 file input。
