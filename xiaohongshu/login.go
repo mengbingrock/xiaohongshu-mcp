@@ -317,17 +317,41 @@ func verificationSubmitEnabled(className string, disabled, ariaDisabled *string)
 	return true
 }
 
+// 首页上代表"已登录"的用户元素
+const loginUserSelector = `.main-container .user .link-wrapper .channel`
+
+const (
+	// 经本地出口代理回国访问首页很慢，线上实测单次 70s 以上也出现过。给够预算，
+	// 但要留在调用方（Postiz）的超时之内，否则先超时的是客户端，这里的明确报错就
+	// 永远传不出去。
+	loginCheckBudget = 120 * time.Second
+	// load 事件要等齐所有子资源，判断登录态并不需要它。
+	loginCheckLoadBudget = 45 * time.Second
+	// 真正的判据是用户元素，页面慢的时候给它一段时间出现。
+	loginCheckElementBudget = 20 * time.Second
+)
+
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	// 加超时保护：只是查登录态的快速检查，不应无限挂（登录扫码的等待在 Login/WaitForLogin 里）。
-	// 经代理访问 INTL 首页 load 事件可能超过 30s，放宽到 60s。
-	pp := a.page.Context(ctx).Timeout(60 * time.Second)
+	pp := a.page.Context(ctx).Timeout(loginCheckBudget)
 	trace := newPublishTrace("login-check")
 	trace.AttachNetwork(pp)
-	pp.MustNavigate(CurrentSite().HomeURL).MustWaitLoad()
 
-	time.Sleep(1 * time.Second)
+	// 这里原来是 MustNavigate().MustWaitLoad()。rod 的 Must* 超时是 panic，冒到 MCP
+	// 层只剩一句 "context deadline exceeded"：看不出卡在哪一步，更看不出是代理慢。
+	// 改成显式报错，并把现场截图留下来。
+	if err := pp.Navigate(CurrentSite().HomeURL); err != nil {
+		trace.Capture(pp, "explore_navigate_failed")
+		return false, errors.Wrapf(err, "打开小红书首页失败或超时（%s）", CurrentSite().HomeURL)
+	}
 
-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+	// load 超时不等于未登录：子资源慢的时候照样能判断，交给元素检查决定。
+	if err := pp.Timeout(loginCheckLoadBudget).WaitLoad(); err != nil {
+		logrus.Warnf("首页 load 事件未在 %s 内完成，改用页面元素判断: %v",
+			loginCheckLoadBudget, err)
+	}
+
+	exists, err := waitForLoginElement(pp, loginCheckElementBudget)
 	if err != nil {
 		trace.Capture(pp, "explore_check_error")
 		return false, errors.Wrap(err, "check login status failed")
@@ -349,6 +373,24 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 
 	trace.Capture(pp, "explore_logged_in")
 	return true, nil
+}
+
+// waitForLoginElement 等首页上的已登录用户元素出现。
+//
+// 页面慢只是慢，不等于未登录，所以这里轮询到预算用完再下结论；查询本身报错才是
+// 真的出问题。
+func waitForLoginElement(page *rod.Page, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		exists, _, err := page.Has(loginUserSelector)
+		if err != nil {
+			return false, err
+		}
+		if exists || time.Now().After(deadline) {
+			return exists, nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // CheckCreatorLoginStatus verifies the creator-center session used by publish
