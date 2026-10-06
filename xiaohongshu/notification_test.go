@@ -198,3 +198,35 @@ func TestRawNotification_From(t *testing.T) {
 	assert.Equal(t, "u9", payload.MessageList[0].from().UserID)
 	assert.Equal(t, "丁", payload.MessageList[1].from().Nickname)
 }
+
+// TestConvertNotificationsTargetComment 回复类通知带上被回复的原评论，用来认出「这是在回我的评论」。
+// 被判违规的原评论不带出。Added in ycl-2004/xiaohongshu-mcp.
+func TestConvertNotificationsTargetComment(t *testing.T) {
+	var raw []rawNotification
+	err := json.Unmarshal([]byte(`[
+		{"id":"n1","type":"comment/comment","title":"回复了你的评论","time":1,
+		 "userInfo":{"userid":"friend","nickname":"朋友"},
+		 "commentInfo":{"id":"c2","content":"谢谢","illegalInfo":{"illegalStatus":"NORMAL"},
+		   "targetComment":{"id":"c1","content":"我们的评论","userInfo":{"userid":"me","nickname":"测试号"},
+		     "illegalInfo":{"illegalStatus":"NORMAL"}}},
+		 "itemInfo":{"id":"note1","type":"note_info","xsecToken":"tok"}},
+		{"id":"n2","type":"comment/comment","title":"回复了你的评论","time":2,
+		 "commentInfo":{"id":"c4","content":"嗯","targetComment":{"id":"c3","illegalInfo":{"illegalStatus":"DELETE"}}},
+		 "itemInfo":{"id":"note1","type":"note_info"}},
+		{"id":"n3","type":"comment/item","title":"评论了你的笔记","time":3,
+		 "commentInfo":{"id":"c5","content":"你好"},"itemInfo":{"id":"note2","type":"note_info"}}
+	]`), &raw)
+	require.NoError(t, err)
+
+	items, filtered := convertNotifications(raw, 10)
+	require.Len(t, items, 3)
+	assert.Equal(t, 0, filtered)
+	require.NotNil(t, items[0].TargetComment)
+	assert.Equal(t, "c1", items[0].TargetComment.ID)
+	assert.Equal(t, "me", items[0].TargetComment.Author.UserID)
+	assert.Equal(t, "我们的评论", items[0].TargetComment.Content)
+	assert.Equal(t, "c2", items[0].CommentID)
+	assert.Equal(t, "note1", items[0].FeedID)
+	assert.Nil(t, items[1].TargetComment, "被删除的原评论不带出")
+	assert.Nil(t, items[2].TargetComment, "直接评论笔记没有原评论")
+}

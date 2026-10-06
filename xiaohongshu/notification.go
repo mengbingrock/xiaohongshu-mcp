@@ -75,6 +75,16 @@ type NotificationItem struct {
 	FeedID        string           `json:"feed_id,omitempty"`
 	FeedXsecToken string           `json:"feed_xsec_token,omitempty"`
 	FeedTitle     string           `json:"feed_title,omitempty"`
+	// TargetComment 被回复的那条原评论（不是新回复）。调用方要先核对作者是不是自己。
+	// Ported from liaogx/xiaohongshu-mcp (Apache-2.0) in ycl-2004/xiaohongshu-mcp; see NOTICE.
+	TargetComment *NotificationQuotedComment `json:"target_comment,omitempty"`
+}
+
+// NotificationQuotedComment 通知里引用的原评论。
+type NotificationQuotedComment struct {
+	ID      string           `json:"id"`
+	Content string           `json:"content"`
+	Author  NotificationUser `json:"author"`
 }
 
 // NotificationList 一个分区的通知列表。
@@ -256,10 +266,12 @@ type (
 	}
 
 	rawComment struct {
-		ID      string     `json:"id"`
-		Content string     `json:"content"`
-		Liked   bool       `json:"liked"`
-		Illegal rawIllegal `json:"illegalInfo"`
+		ID            string      `json:"id"`
+		Content       string      `json:"content"`
+		Liked         bool        `json:"liked"`
+		Illegal       rawIllegal  `json:"illegalInfo"`
+		UserInfo      rawUser     `json:"userInfo"`
+		TargetComment *rawComment `json:"targetComment,omitempty"`
 	}
 
 	rawItem struct {
@@ -345,6 +357,14 @@ func convertNotifications(raw []rawNotification, limit int) ([]NotificationItem,
 			CommentText: r.Comment.Content,
 			Liked:       r.Comment.Liked,
 			FeedTitle:   r.Item.Content,
+		}
+		if target := r.Comment.TargetComment; target != nil && target.ID != "" &&
+			(target.Illegal.Status == "" || target.Illegal.Status == statusNormal) {
+			item.TargetComment = &NotificationQuotedComment{
+				ID:      target.ID,
+				Content: target.Content,
+				Author:  NotificationUser{UserID: target.UserInfo.UserID, Nickname: target.UserInfo.Nickname},
+			}
 		}
 		if r.Item.Type == itemTypeNote {
 			item.FeedID = r.Item.ID
