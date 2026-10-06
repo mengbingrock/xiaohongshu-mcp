@@ -278,6 +278,7 @@ func TestStrictRoutesRegistered(t *testing.T) {
 	for _, want := range []string{
 		"GET /health",
 		"GET /api/v1/login/status",
+		"GET /api/v1/access/probe",
 		"POST /api/v1/feeds/search",
 		"POST /api/v1/feeds/detail",
 		"POST /api/v1/user/profile",

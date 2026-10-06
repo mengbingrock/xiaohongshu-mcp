@@ -14,6 +14,12 @@ import (
 
 // respondError 返回错误响应
 func respondError(c *gin.Context, statusCode int, code, message string, details any) {
+	// Modified for ycl-2004/xiaohongshu-mcp：5xx 里再分出超时、页面拦截和笔记不可见（errors_map.go）。
+	if statusCode >= http.StatusInternalServerError {
+		if status, mapped, ok := classifyFailure(details); ok {
+			statusCode, code = status, mapped
+		}
+	}
 	response := ErrorResponse{
 		Error:   message,
 		Code:    code,
