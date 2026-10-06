@@ -285,6 +285,7 @@ func TestStrictRoutesRegistered(t *testing.T) {
 		"GET /api/v1/user/me",
 		"GET /api/v1/notifications/unread",
 		"POST /api/v1/notifications/list",
+		"GET /api/v1/chat/conversations",
 		"POST /api/v1/publish",
 		"POST /api/v1/feeds/comment",
 		"POST /api/v1/feeds/comment/reply",

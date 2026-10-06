@@ -65,6 +65,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		read.GET("/notifications/unread", appServer.getUnreadCountHandler)
 		read.GET("/notifications/list", appServer.listNotificationsHandler)
 		read.POST("/notifications/list", appServer.listNotificationsHandler)
+		read.GET("/chat/conversations", appServer.chatConversationsHandler)
 	}
 
 	// 写路由：严格模式下只认写 token。登录也算写：它会换掉这个号的会话

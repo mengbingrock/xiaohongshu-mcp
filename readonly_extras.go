@@ -1,11 +1,13 @@
 package main
 
-// Added in ycl-2004/xiaohongshu-mcp; see NOTICE.
+// Added in ycl-2004/xiaohongshu-mcp; see NOTICE. 账号状态探针和私信会话读取（都是只读）。
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
@@ -45,4 +47,33 @@ func (s *AppServer) accessProbeHandler(c *gin.Context) {
 		return
 	}
 	respondSuccess(c, result, "读取账号访问状态成功")
+}
+
+// ChatConversationsResponse 私信会话列表：平台响应原样返回。
+type ChatConversationsResponse struct {
+	Raw json.RawMessage `json:"raw"`
+}
+
+// ReadConversations 打开网页版私信页读取会话列表（只读）。
+func (s *XiaohongshuService) ReadConversations(ctx context.Context) (*ChatConversationsResponse, error) {
+	b := newBrowser()
+	defer b.Close()
+	page := b.NewPage()
+	defer page.Close()
+
+	raw, err := xiaohongshu.ReadConversations(ctx, page, 45*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return &ChatConversationsResponse{Raw: raw}, nil
+}
+
+// chatConversationsHandler 处理 [GET /api/v1/chat/conversations]。
+func (s *AppServer) chatConversationsHandler(c *gin.Context) {
+	result, err := s.xiaohongshuService.ReadConversations(c.Request.Context())
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "CHAT_READ_FAILED", "读取私信会话失败", err.Error())
+		return
+	}
+	respondSuccess(c, result, "读取私信会话成功")
 }
