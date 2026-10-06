@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -74,4 +76,54 @@ func TestValidateListen(t *testing.T) {
 	for _, bad := range []string{":18060", "0.0.0.0:18060", "192.168.1.5:18060", "example.com:80", "18060"} {
 		assert.Error(t, validateListen(bad), bad)
 	}
+}
+
+// TestSerialMiddleware 第二个请求要等第一个结束才进入；排队超时返回 503 BUSY。
+func TestSerialMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(serialMiddleware(300 * time.Millisecond))
+	var mu sync.Mutex
+	var events []string
+	release := make(chan struct{})
+	router.GET("/slow", func(c *gin.Context) {
+		mu.Lock()
+		events = append(events, "slow-start")
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		events = append(events, "slow-end")
+		mu.Unlock()
+		c.Status(http.StatusNoContent)
+	})
+	router.GET("/fast", func(c *gin.Context) {
+		mu.Lock()
+		events = append(events, "fast")
+		mu.Unlock()
+		c.Status(http.StatusNoContent)
+	})
+
+	serve := func(path string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		return recorder
+	}
+
+	slowDone := make(chan int)
+	go func() { slowDone <- serve("/slow").Code }()
+	time.Sleep(50 * time.Millisecond) // 让 slow 先拿到锁
+
+	// 排队超时：slow 还占着锁
+	busy := serve("/fast")
+	assert.Equal(t, http.StatusServiceUnavailable, busy.Code)
+	assert.Contains(t, busy.Body.String(), "BUSY")
+
+	// slow 结束后，排队中的请求才进入
+	fastDone := make(chan int)
+	go func() { fastDone <- serve("/fast").Code }()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	assert.Equal(t, http.StatusNoContent, <-slowDone)
+	assert.Equal(t, http.StatusNoContent, <-fastDone)
+	assert.Equal(t, []string{"slow-start", "slow-end", "fast"}, events)
 }

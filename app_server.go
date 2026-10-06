@@ -53,6 +53,7 @@ type AppServer struct {
 	router             *gin.Engine
 	httpServer         *http.Server
 	access             accessConfig
+	lockWait           time.Duration // 浏览器操作排队的最长等待
 }
 
 // NewAppServer 创建新的应用服务器实例
@@ -72,6 +73,7 @@ func NewAppServerWithServices(xiaohongshuService *XiaohongshuService, chineseInL
 		chineseInLAService: chineseInLAService,
 		redditService:      redditService,
 		access:             access,
+		lockWait:           15 * time.Minute,
 	}
 
 	// 初始化 MCP Server（需要在创建 appServer 之后，因为工具注册需要访问 appServer）

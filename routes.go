@@ -1,7 +1,7 @@
 package main
 
 // Modified for ycl-2004/xiaohongshu-mcp; see NOTICE. 只注册 Marketing_Agent 用到的路由，按读、写分组；
-// /mcp 默认关闭。上游的二维码登录、发视频、首页推荐、点赞收藏、通知回复和点赞路由不注册
+// /mcp 默认关闭；所有接口共用一把锁，同一时间只跑一个浏览器操作。上游的二维码登录、发视频、首页推荐、点赞收藏、通知回复和点赞路由不注册
 // （对应的 MCP 工具仍在，开启 -enable-mcp 后可用，且需要写 token）。
 
 import (
@@ -30,6 +30,8 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 	// 健康检查
 	router.GET("/health", healthHandler)
 
+	// 读写共用一把锁：一个账号同一时间只跑一个浏览器操作。
+	serial := serialMiddleware(appServer.lockWait)
 	if cfg.EnableMCP {
 		// MCP 端点 - 使用官方 SDK 的 Streamable HTTP Handler
 		mcpHandler := mcp.NewStreamableHTTPHandler(
@@ -44,13 +46,13 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 				Stateless: true,
 			},
 		)
-		mcpGroup := router.Group("", accessMiddleware(cfg, scopeWrite))
+		mcpGroup := router.Group("", accessMiddleware(cfg, scopeWrite), serial)
 		mcpGroup.Any("/mcp", gin.WrapH(mcpHandler))
 		mcpGroup.Any("/mcp/*path", gin.WrapH(mcpHandler))
 	}
 
 	// 读路由：严格模式下读、写 token 都能调
-	read := router.Group("/api/v1", accessMiddleware(cfg, scopeRead))
+	read := router.Group("/api/v1", accessMiddleware(cfg, scopeRead), serial)
 	{
 		read.GET("/login/status", appServer.checkLoginStatusHandler)
 		read.GET("/feeds/list", appServer.listFeedsHandler)
@@ -65,7 +67,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 	}
 
 	// 写路由：严格模式下只认写 token。登录也算写：它会换掉这个号的会话
-	write := router.Group("/api/v1", accessMiddleware(cfg, scopeWrite))
+	write := router.Group("/api/v1", accessMiddleware(cfg, scopeWrite), serial)
 	{
 		write.GET("/login/qrcode", appServer.getLoginQrcodeHandler)
 		write.GET("/login/sessions/:session_id", appServer.getLoginSessionStatusHandler)

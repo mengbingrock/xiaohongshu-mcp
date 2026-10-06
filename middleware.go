@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
@@ -143,6 +144,29 @@ func corsMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// serialMiddleware 一个进程只服务一个账号：同一时间只放一个浏览器操作进来，其余排队。
+// 上游每个请求都新开一个 Chromium，同一账号并发就会出现多个同指纹会话，本身就是风控信号。
+// 排队超过 wait 返回 503 BUSY；调用方断开时放弃排队。读写共用同一把锁。
+func serialMiddleware(wait time.Duration) gin.HandlerFunc {
+	slot := make(chan struct{}, 1)
+	return func(c *gin.Context) {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case slot <- struct{}{}:
+		case <-timer.C:
+			respondError(c, http.StatusServiceUnavailable, "BUSY", "另一个浏览器操作还在进行，排队超时", nil)
+			c.Abort()
+			return
+		case <-c.Request.Context().Done():
+			c.Abort()
+			return
+		}
+		defer func() { <-slot }()
 		c.Next()
 	}
 }

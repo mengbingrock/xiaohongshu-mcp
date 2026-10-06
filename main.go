@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
@@ -32,6 +33,7 @@ func main() {
 		headless bool
 		port     string
 		access   accessConfig
+		lockWait time.Duration
 	)
 	flag.BoolVar(&headless, "headless", true, "是否无头模式")
 	flag.StringVar(&port, "port", ":18060", "监听地址；给了读、写 token（严格模式）时只允许本机回环地址")
@@ -49,6 +51,7 @@ func main() {
 	flag.BoolVar(&redditConfig.Headless, "reddit-headless", redditConfig.Headless, "Reddit 是否使用无头模式（Reddit 可能会阻止无头浏览器）")
 	flag.StringVar(&redditConfig.ProfileRoot, "reddit-profile-root", redditConfig.ProfileRoot, "Postiz Reddit 独立浏览器配置根目录")
 	flag.StringVar(&redditConfig.BrowserBin, "reddit-browser-bin", redditConfig.BrowserBin, "Reddit 浏览器可执行文件")
+	flag.DurationVar(&lockWait, "lock-wait", 15*time.Minute, "浏览器操作排队的最长等待，超时返回 503 BUSY")
 	flag.Parse()
 	if err := chineseinla.ValidateCookieIsolation(chineseInLAConfig.CookiePath, cookies.GetCookiesFilePath()); err != nil {
 		logrus.Fatalf("invalid cookie configuration: %v", err)
@@ -108,6 +111,7 @@ func main() {
 
 	// 创建并启动应用服务器
 	appServer := NewAppServerWithServices(xiaohongshuService, chineseInLAService, redditService, access)
+	appServer.lockWait = lockWait
 	if err := appServer.Start(port); err != nil {
 		logrus.Fatalf("failed to run server: %v", err)
 	}
