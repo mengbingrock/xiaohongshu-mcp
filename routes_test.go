@@ -311,6 +311,7 @@ func TestRouteScopes(t *testing.T) {
 		{"读路由接受读 token", http.MethodPost, "/api/v1/feeds/detail", read, http.StatusBadRequest},
 		{"写路由拒绝读 token", http.MethodPost, "/api/v1/feeds/comment", read, http.StatusForbidden},
 		{"写路由接受写 token", http.MethodPost, "/api/v1/feeds/comment", write, http.StatusBadRequest},
+		{"评论缺幂等 key 被参数校验拦下", http.MethodPost, "/api/v1/feeds/comment", write, http.StatusBadRequest},
 		{"回复拒绝读 token", http.MethodPost, "/api/v1/feeds/comment/reply", read, http.StatusForbidden},
 		{"发布拒绝读 token", http.MethodPost, "/api/v1/publish", read, http.StatusForbidden},
 		{"MCP 拒绝读 token", http.MethodPost, "/mcp", read, http.StatusForbidden},

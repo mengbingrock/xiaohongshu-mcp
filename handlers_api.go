@@ -15,7 +15,9 @@ import (
 // respondError 返回错误响应
 func respondError(c *gin.Context, statusCode int, code, message string, details any) {
 	// Modified for ycl-2004/xiaohongshu-mcp：5xx 里再分出超时、页面拦截和笔记不可见（errors_map.go）。
-	if statusCode >= http.StatusInternalServerError {
+	// 写操作的失败（writeFailure）已经由 respondInteractionError 定好码，不能再改：
+	// 「点了发送、结果不明」的原因里常带超时字样，改成 TIMEOUT 会让调用方误以为没发出。
+	if _, isWrite := details.(writeFailure); !isWrite && statusCode >= http.StatusInternalServerError {
 		if status, mapped, ok := classifyFailure(details); ok {
 			statusCode, code = status, mapped
 		}
@@ -289,10 +291,9 @@ func (s *AppServer) postCommentHandler(c *gin.Context) {
 	}
 
 	// 发表评论
-	result, err := s.xiaohongshuService.PostCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.Content)
+	result, err := s.xiaohongshuService.PostCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.Content, req.IdempotencyKey)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "POST_COMMENT_FAILED",
-			"发表评论失败", err.Error())
+		respondInteractionError(c, "发表评论失败", err)
 		return
 	}
 
@@ -308,10 +309,9 @@ func (s *AppServer) replyCommentHandler(c *gin.Context) {
 		return
 	}
 
-	result, err := s.xiaohongshuService.ReplyCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content)
+	result, err := s.xiaohongshuService.ReplyCommentToFeed(c.Request.Context(), req.FeedID, req.XsecToken, req.CommentID, req.UserID, req.Content, req.IdempotencyKey)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "REPLY_COMMENT_FAILED",
-			"回复评论失败", err.Error())
+		respondInteractionError(c, "回复评论失败", err)
 		return
 	}
 

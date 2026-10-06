@@ -688,8 +688,15 @@ func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken,
 
 }
 
-// PostCommentToFeed 发表评论到Feed
-func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsecToken, content string) (*PostCommentResponse, error) {
+// PostCommentToFeed 发表评论到Feed。key 是幂等 key：同一个 key 已确认成功就直接返回那份回执，
+// 有记录但没确认成功就拒绝（不开浏览器）。Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsecToken, content, key string) (*PostCommentResponse, error) {
+	if replay, err := xiaohongshu.ReplayOrRefuse(key); err != nil || replay != nil {
+		if err != nil {
+			return nil, err
+		}
+		return &PostCommentResponse{FeedID: feedID, Success: true, Message: "同一幂等 key 已发表成功，返回原回执", Receipt: replay}, nil
+	}
 	b := newBrowser()
 	defer b.Close()
 
@@ -698,11 +705,12 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 
 	action := xiaohongshu.NewCommentFeedAction(page)
 
-	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
+	receipt, err := action.PostComment(ctx, feedID, xsecToken, content, key)
+	if err != nil {
 		return nil, err
 	}
 
-	return &PostCommentResponse{FeedID: feedID, Success: true, Message: "评论发表成功"}, nil
+	return &PostCommentResponse{FeedID: feedID, Success: true, Message: "评论发表成功", Receipt: receipt}, nil
 }
 
 // LikeFeed 点赞笔记
@@ -765,8 +773,16 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 	return &ActionResult{FeedID: feedID, Success: true, Message: "取消收藏成功或未收藏"}, nil
 }
 
-// ReplyCommentToFeed 回复指定评论
-func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xsecToken, commentID, userID, content string) (*ReplyCommentResponse, error) {
+// ReplyCommentToFeed 回复指定评论。key 的含义同 PostCommentToFeed。
+func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xsecToken, commentID, userID, content, key string) (*ReplyCommentResponse, error) {
+	response := &ReplyCommentResponse{FeedID: feedID, TargetCommentID: commentID, TargetUserID: userID, Success: true}
+	if replay, err := xiaohongshu.ReplayOrRefuse(key); err != nil || replay != nil {
+		if err != nil {
+			return nil, err
+		}
+		response.Message, response.Receipt = "同一幂等 key 已回复成功，返回原回执", replay
+		return response, nil
+	}
 	b := newBrowser()
 	defer b.Close()
 
@@ -775,17 +791,13 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 
 	action := xiaohongshu.NewCommentFeedAction(page)
 
-	if err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content); err != nil {
+	receipt, err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content, key)
+	if err != nil {
 		return nil, err
 	}
 
-	return &ReplyCommentResponse{
-		FeedID:          feedID,
-		TargetCommentID: commentID,
-		TargetUserID:    userID,
-		Success:         true,
-		Message:         "评论回复成功",
-	}, nil
+	response.Message, response.Receipt = "评论回复成功", receipt
+	return response, nil
 }
 
 // GetUnreadCount 获取通知未读数

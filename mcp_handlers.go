@@ -772,7 +772,7 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 
 	logrus.Infof("MCP: 发表评论 - Feed ID: %s, 内容长度: %d", feedID, len(content))
 
-	result, err := s.xiaohongshuService.PostCommentToFeed(ctx, feedID, xsecToken, content)
+	result, err := s.xiaohongshuService.PostCommentToFeed(ctx, feedID, xsecToken, content, "mcp:comment:"+feedID+":"+content)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{
@@ -843,7 +843,7 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 
 	logrus.Infof("MCP: 回复评论 - Feed ID: %s, Comment ID: %s, User ID: %s, 内容长度: %d", feedID, commentID, userID, len(content))
 
-	result, err := s.xiaohongshuService.ReplyCommentToFeed(ctx, feedID, xsecToken, commentID, userID, content)
+	result, err := s.xiaohongshuService.ReplyCommentToFeed(ctx, feedID, xsecToken, commentID, userID, content, "mcp:reply:"+feedID+":"+commentID+":"+userID+":"+content)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{
