@@ -1,71 +1,50 @@
 package main
 
+// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
 
-func newAuthTestRouter(token string) *gin.Engine {
+var testAccess = accessConfig{
+	ReadToken:  strings.Repeat("r", minTokenLength),
+	WriteToken: strings.Repeat("w", minTokenLength),
+}
+
+func newScopeTestRouter(need scope) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(authMiddleware(token))
+	router.Use(scopeMiddleware(testAccess, need))
 	router.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
 	return router
 }
 
-func TestAuthMiddlewareAllowsRequestWhenDisabled(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/protected", nil)
-
-	newAuthTestRouter("").ServeHTTP(recorder, request)
-
-	assert.Equal(t, http.StatusNoContent, recorder.Code)
-}
-
-func TestAuthMiddlewareAllowsValidBearerToken(t *testing.T) {
+func TestScopeMiddleware(t *testing.T) {
+	read, write := "Bearer "+testAccess.ReadToken, "Bearer "+testAccess.WriteToken
 	tests := []struct {
 		name          string
+		need          scope
 		authorization string
+		want          int
 	}{
-		{name: "standard scheme", authorization: "Bearer secret-token"},
-		{name: "lowercase scheme", authorization: "bearer secret-token"},
-		{name: "extra whitespace after scheme", authorization: "Bearer  secret-token"},
+		{"读路由接受读 token", scopeRead, read, http.StatusNoContent},
+		{"读路由接受写 token", scopeRead, write, http.StatusNoContent},
+		{"写路由接受写 token", scopeWrite, write, http.StatusNoContent},
+		{"写路由拒绝读 token", scopeWrite, read, http.StatusForbidden},
+		{"小写 scheme", scopeRead, "bearer " + testAccess.ReadToken, http.StatusNoContent},
+		{"没带头", scopeRead, "", http.StatusUnauthorized},
+		{"错误 scheme", scopeWrite, "Basic " + testAccess.WriteToken, http.StatusUnauthorized},
+		{"错误 token", scopeRead, "Bearer wrong", http.StatusUnauthorized},
+		{"空 token", scopeRead, "Bearer ", http.StatusUnauthorized},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodGet, "/protected", nil)
-			request.Header.Set("Authorization", tt.authorization)
-
-			newAuthTestRouter("secret-token").ServeHTTP(recorder, request)
-
-			assert.Equal(t, http.StatusNoContent, recorder.Code)
-		})
-	}
-}
-
-func TestAuthMiddlewareRejectsInvalidCredentials(t *testing.T) {
-	tests := []struct {
-		name          string
-		authorization string
-	}{
-		{name: "missing header"},
-		{name: "wrong scheme", authorization: "Basic secret-token"},
-		{name: "missing token", authorization: "Bearer "},
-		{name: "wrong token", authorization: "Bearer wrong-token"},
-		// 下面两个头部两侧带空格的用例只在内存态成立：真实请求经 net/textproto
-		// 解析时两侧 OWS 已被剥掉，客户端多打空格实际会放行，不会被拒。
-		{name: "leading whitespace", authorization: " Bearer secret-token"},
-		{name: "trailing whitespace", authorization: "Bearer secret-token "},
-	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -73,12 +52,26 @@ func TestAuthMiddlewareRejectsInvalidCredentials(t *testing.T) {
 			if tt.authorization != "" {
 				request.Header.Set("Authorization", tt.authorization)
 			}
-
-			newAuthTestRouter("secret-token").ServeHTTP(recorder, request)
-
-			assert.Equal(t, http.StatusUnauthorized, recorder.Code)
-			assert.Equal(t, "Bearer", recorder.Header().Get("WWW-Authenticate"))
-			assert.JSONEq(t, `{"error":"未授权","code":"UNAUTHORIZED"}`, recorder.Body.String())
+			newScopeTestRouter(tt.need).ServeHTTP(recorder, request)
+			assert.Equal(t, tt.want, recorder.Code)
 		})
+	}
+}
+
+func TestAccessConfigValidate(t *testing.T) {
+	long := func(c string) string { return strings.Repeat(c, minTokenLength) }
+	assert.NoError(t, accessConfig{ReadToken: long("a"), WriteToken: long("b")}.validate())
+	assert.Error(t, accessConfig{ReadToken: "", WriteToken: long("b")}.validate(), "读 token 为空")
+	assert.Error(t, accessConfig{ReadToken: long("a"), WriteToken: ""}.validate(), "写 token 为空")
+	assert.Error(t, accessConfig{ReadToken: "short", WriteToken: long("b")}.validate(), "太短")
+	assert.Error(t, accessConfig{ReadToken: long("a"), WriteToken: long("a")}.validate(), "读写相同")
+}
+
+func TestValidateListen(t *testing.T) {
+	for _, ok := range []string{"127.0.0.1:18060", "localhost:18060", "[::1]:18060"} {
+		assert.NoError(t, validateListen(ok), ok)
+	}
+	for _, bad := range []string{":18060", "0.0.0.0:18060", "192.168.1.5:18060", "example.com:80", "18060"} {
+		assert.Error(t, validateListen(bad), bad)
 	}
 }

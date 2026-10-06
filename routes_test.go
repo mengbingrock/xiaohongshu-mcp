@@ -15,7 +15,7 @@ import (
 //
 // 契约由 routes.go 里一行 Stateless 支撑，丢掉它编译和其他单测都不会报错。
 func TestMCPStatelessSinglePost(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("")))
 	server := httptest.NewServer(router)
 	defer server.Close()
 
@@ -58,7 +58,7 @@ func TestMCPStatelessSinglePost(t *testing.T) {
 // 三个工具的注册各是 registerTools 里一段独立代码，漏掉任何一个编译都不会报错，
 // 只有真正调用时才会发现工具不存在。
 func TestNotificationToolsRegistered(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("")))
 	server := httptest.NewServer(router)
 	defer server.Close()
 
@@ -118,7 +118,7 @@ func TestNotificationToolsRegistered(t *testing.T) {
 // TestChineseInLAToolsRegistered fixes the contract that one MCP endpoint hosts
 // both the original Xiaohongshu tools and the namespaced ChineseInLA workflow.
 func TestChineseInLAToolsRegistered(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("")))
 	server := httptest.NewServer(router)
 	defer server.Close()
 
@@ -165,7 +165,7 @@ func TestChineseInLAToolsRegistered(t *testing.T) {
 // 读路由表而不是发请求：这些 handler 会真的起浏览器访问小红书，
 // 单测里不能碰。
 func TestNotificationRoutesRegistered(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("")))
 
 	registered := make(map[string]bool)
 	for _, r := range router.Routes() {
@@ -185,7 +185,7 @@ func TestNotificationRoutesRegistered(t *testing.T) {
 }
 
 func TestLoginOTPRoutesRegistered(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("")))
 
 	registered := make(map[string]bool)
 	for _, r := range router.Routes() {
@@ -201,7 +201,7 @@ func TestLoginOTPRoutesRegistered(t *testing.T) {
 }
 
 func TestChineseInLAHeadlessLoginRoutesRegistered(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("")))
 
 	registered := make(map[string]bool)
 	for _, route := range router.Routes() {
@@ -218,7 +218,7 @@ func TestChineseInLAHeadlessLoginRoutesRegistered(t *testing.T) {
 }
 
 func TestProtectedRoutesRequireBearerToken(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), "secret-token"))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("secret-token")))
 
 	tests := []struct {
 		name       string
@@ -247,7 +247,7 @@ func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 }
 
 func TestMCPAcceptsConfiguredBearerToken(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), "secret-token"))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("secret-token")))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/mcp",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
@@ -258,4 +258,90 @@ func TestMCPAcceptsConfiguredBearerToken(t *testing.T) {
 	router.ServeHTTP(recorder, request)
 
 	assert.Equal(t, http.StatusOK, recorder.Code)
+}
+
+func withMCP() accessConfig {
+	cfg := testAccess
+	cfg.EnableMCP = true
+	return cfg
+}
+
+// TestStrictRoutesRegistered 严格模式下 Marketing_Agent 用到的路由都在。
+// 读路由表而不是发请求：这些 handler 会真的起浏览器访问小红书，单测里不能碰。
+func TestStrictRoutesRegistered(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), testAccess))
+
+	registered := make(map[string]bool)
+	for _, r := range router.Routes() {
+		registered[r.Method+" "+r.Path] = true
+	}
+	for _, want := range []string{
+		"GET /health",
+		"GET /api/v1/login/status",
+		"POST /api/v1/feeds/search",
+		"POST /api/v1/feeds/detail",
+		"POST /api/v1/user/profile",
+		"GET /api/v1/user/me",
+		"GET /api/v1/notifications/unread",
+		"POST /api/v1/notifications/list",
+		"POST /api/v1/publish",
+		"POST /api/v1/feeds/comment",
+		"POST /api/v1/feeds/comment/reply",
+	} {
+		assert.True(t, registered[want], "路由 %s 应已注册", want)
+	}
+	assert.False(t, registered["POST /mcp"], "严格模式默认不开 /mcp")
+}
+
+// TestRouteScopes 写路由拒绝读 token；鉴权通过后请求体为空，在起浏览器之前就被参数校验拦下（400）。
+func TestRouteScopes(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), withMCP()))
+	read, write := "Bearer "+testAccess.ReadToken, "Bearer "+testAccess.WriteToken
+
+	tests := []struct {
+		name          string
+		method        string
+		path          string
+		authorization string
+		want          int
+	}{
+		{"健康检查公开", http.MethodGet, "/health", "", http.StatusOK},
+		{"读路由要 token", http.MethodPost, "/api/v1/feeds/detail", "", http.StatusUnauthorized},
+		{"读路由接受读 token", http.MethodPost, "/api/v1/feeds/detail", read, http.StatusBadRequest},
+		{"写路由拒绝读 token", http.MethodPost, "/api/v1/feeds/comment", read, http.StatusForbidden},
+		{"写路由接受写 token", http.MethodPost, "/api/v1/feeds/comment", write, http.StatusBadRequest},
+		{"回复拒绝读 token", http.MethodPost, "/api/v1/feeds/comment/reply", read, http.StatusForbidden},
+		{"发布拒绝读 token", http.MethodPost, "/api/v1/publish", read, http.StatusForbidden},
+		{"MCP 拒绝读 token", http.MethodPost, "/mcp", read, http.StatusForbidden},
+		{"没有 CORS 预检", http.MethodOptions, "/api/v1/feeds/detail", "", http.StatusNotFound},
+		{"视频发布拒绝读 token", http.MethodPost, "/api/v1/publish_video", read, http.StatusForbidden},
+		{"点赞拒绝读 token", http.MethodPost, "/api/v1/feeds/like", read, http.StatusForbidden},
+		{"通知回复拒绝读 token", http.MethodPost, "/api/v1/notifications/reply", read, http.StatusForbidden},
+		{"清会话拒绝读 token", http.MethodDelete, "/api/v1/login/cookies", read, http.StatusForbidden},
+		{"取二维码拒绝读 token", http.MethodGet, "/api/v1/login/qrcode", read, http.StatusForbidden},
+		{"验证码拒绝读 token", http.MethodPost, "/api/v1/login/code", read, http.StatusForbidden},
+		{"ChineseInLA 登录拒绝读 token", http.MethodPost, "/api/v1/chineseinla/login/password", read, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(""))
+			request.Header.Set("Content-Type", "application/json")
+			if tt.authorization != "" {
+				request.Header.Set("Authorization", tt.authorization)
+			}
+			router.ServeHTTP(recorder, request)
+			assert.Equal(t, tt.want, recorder.Code)
+			assert.Empty(t, recorder.Header().Get("Access-Control-Allow-Origin"))
+		})
+	}
+}
+
+func TestMCPDisabledByDefault(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), testAccess))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+	request.Header.Set("Authorization", "Bearer "+testAccess.WriteToken)
+	router.ServeHTTP(recorder, request)
+	assert.Equal(t, http.StatusNotFound, recorder.Code)
 }

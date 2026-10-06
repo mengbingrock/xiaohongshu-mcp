@@ -44,7 +44,7 @@ func TestRespondErrorLogLevel(t *testing.T) {
 }
 
 func TestSubmitLoginCodeHandlerRejectsInvalidOrUnknownSession(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), legacyAccess("")))
 
 	tests := []struct {
 		name       string

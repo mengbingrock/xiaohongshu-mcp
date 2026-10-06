@@ -18,7 +18,7 @@ func TestChineseInLALoginHTTPWorkflowDoesNotEchoPassword(t *testing.T) {
 		State:      chineseinla.LoginSessionInvalidCredentials,
 		Screenshot: []byte("redacted-image"),
 	}}
-	router := setupRoutes(NewAppServerWithChineseInLA(NewXiaohongshuService(), fake, ""))
+	router := setupRoutes(NewAppServerWithChineseInLA(NewXiaohongshuService(), fake, legacyAccess("")))
 	const username = "private-account@example.com"
 	const password = "never-echo-this-password"
 	recorder := httptest.NewRecorder()
@@ -38,7 +38,7 @@ func TestChineseInLALoginHTTPWorkflowDoesNotEchoPassword(t *testing.T) {
 
 func TestChineseInLALoginHTTPErrorResponsesDoNotLeakRequest(t *testing.T) {
 	fake := &fakeChineseInLAService{err: chineseinla.ErrLoginSessionNotFound}
-	router := setupRoutes(NewAppServerWithChineseInLA(NewXiaohongshuService(), fake, ""))
+	router := setupRoutes(NewAppServerWithChineseInLA(NewXiaohongshuService(), fake, legacyAccess("")))
 	const password = "never-echo-this-password"
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/chineseinla/login/password",

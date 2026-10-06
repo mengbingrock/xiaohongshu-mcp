@@ -9,53 +9,39 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestGetCookiesFilePath 校验路径优先级：COOKIES_PATH > 当前目录 > /tmp（旧路径兜底）。
-// 用 TMPDIR 重定向 os.TempDir()、t.Chdir 重定向当前目录，做到 hermetic、不碰真实 /tmp。
+// TestGetCookiesFilePath 校验路径：COOKIES_PATH 优先，否则当前目录；不再回落到共享的 /tmp。
 func TestGetCookiesFilePath(t *testing.T) {
 	t.Run("显式指定的COOKIES_PATH永远最优先", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("TMPDIR", dir)
 		t.Setenv("COOKIES_PATH", "/custom/cookies.json")
-
-		// 即使 /tmp 下躺着旧文件，也不能盖掉显式配置
-		assert.NoError(t, os.WriteFile(filepath.Join(dir, "cookies.json"), []byte("[]"), 0644))
-
 		assert.Equal(t, "/custom/cookies.json", GetCookiesFilePath())
 	})
 
-	t.Run("未设COOKIES_PATH时本地目录优先于tmp", func(t *testing.T) {
+	t.Run("tmp下的旧文件不再被使用", func(t *testing.T) {
 		tmp := t.TempDir()
 		t.Setenv("TMPDIR", tmp)
-		t.Setenv("COOKIES_PATH", "")
-
-		assert.NoError(t, os.WriteFile(filepath.Join(tmp, "cookies.json"), []byte("[]"), 0644))
-		cwd := t.TempDir()
-		t.Chdir(cwd)
-		assert.NoError(t, os.WriteFile(filepath.Join(cwd, "cookies.json"), []byte("[]"), 0644))
-
-		assert.Equal(t, "cookies.json", GetCookiesFilePath())
-	})
-
-	t.Run("本地没有时兜底到tmp旧路径", func(t *testing.T) {
-		tmp := t.TempDir()
-		t.Setenv("TMPDIR", tmp)
-		t.Setenv("COOKIES_PATH", "")
-		t.Chdir(t.TempDir()) // 本地目录是空的
-
-		oldPath := filepath.Join(tmp, "cookies.json")
-		assert.NoError(t, os.WriteFile(oldPath, []byte("[]"), 0644))
-
-		assert.Equal(t, oldPath, GetCookiesFilePath())
-	})
-
-	t.Run("都不存在时回退当前目录", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("TMPDIR", dir)
 		t.Setenv("COOKIES_PATH", "")
 		t.Chdir(t.TempDir())
+		assert.NoError(t, os.WriteFile(filepath.Join(tmp, "cookies.json"), []byte("[]"), 0644))
 
 		assert.Equal(t, "cookies.json", GetCookiesFilePath())
 	})
+}
+
+// TestSaveCookiesPrivateAtomic 会话文件以 0600 写入，目录 0700，且不留临时文件。
+func TestSaveCookiesPrivateAtomic(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "account")
+	path := filepath.Join(dir, "cookies.json")
+	assert.NoError(t, NewLoadCookie(path).SaveCookies([]byte("[]")))
+
+	info, err := os.Stat(path)
+	assert.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	dirInfo, err := os.Stat(dir)
+	assert.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), dirInfo.Mode().Perm())
+	entries, err := os.ReadDir(dir)
+	assert.NoError(t, err)
+	assert.Len(t, entries, 1)
 }
 
 // TestLoadSaveDeleteCookies 校验 cookie 文件存取往返与删除的幂等。

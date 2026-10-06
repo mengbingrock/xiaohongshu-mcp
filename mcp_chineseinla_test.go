@@ -251,7 +251,7 @@ func TestChineseInLAErrorsExplainManualVerification(t *testing.T) {
 
 func TestChineseInLAPublishConfirmationGateThroughMCP(t *testing.T) {
 	fake := &fakeChineseInLAService{}
-	router := setupRoutes(NewAppServerWithChineseInLA(NewXiaohongshuService(), fake, ""))
+	router := setupRoutes(NewAppServerWithChineseInLA(NewXiaohongshuService(), fake, legacyAccess("")))
 	server := httptest.NewServer(router)
 	defer server.Close()
 

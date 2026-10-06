@@ -1,0 +1,19 @@
+xiaohongshu-mcp (ycl-2004 patched distribution for Marketing_Agent)
+
+This distribution is derived from:
+https://github.com/xpzouying/xiaohongshu-mcp
+Copyright 2025 xpzouying and the upstream authors, Apache License 2.0 (LICENSE, unchanged).
+
+Some changes port code from:
+https://github.com/liaogx/xiaohongshu-mcp (Apache License 2.0), itself derived from the
+upstream above. Ported parts are marked in their file headers.
+
+third_party/headless_browser is a copy of https://github.com/xpzouying/headless_browser v0.4.0
+(MIT License, third_party/headless_browser/LICENSE) with one change: the --no-sandbox flag is optional.
+
+Changes in this distribution (branch ma/patches) include: separate read and write bearer tokens,
+loopback-only listening, MCP endpoint off by default, no CORS, reduced HTTP routes, private
+atomic cookie writes, one browser operation at a time, browser sandbox kept on macOS,
+structured timeout and page-access error codes, comment submission receipts with idempotency
+keys, reply attribution on notifications, and read-only private message listing.
+Original authors are not responsible for these modifications.

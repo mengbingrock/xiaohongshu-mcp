@@ -1,5 +1,7 @@
 package main
 
+// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+
 import (
 	"flag"
 	"os"
@@ -29,11 +31,14 @@ func main() {
 	var (
 		headless bool
 		port     string
-		token    string
+		access   accessConfig
 	)
 	flag.BoolVar(&headless, "headless", true, "是否无头模式")
-	flag.StringVar(&port, "port", ":18060", "端口")
-	flag.StringVar(&token, "token", "", "鉴权 Token，留空则读取 AUTH_TOKEN")
+	flag.StringVar(&port, "port", ":18060", "监听地址；给了读、写 token（严格模式）时只允许本机回环地址")
+	flag.StringVar(&access.LegacyToken, "token", "", "兼容模式的鉴权 Token，留空则读取 AUTH_TOKEN；给了读、写 token 时不用")
+	flag.StringVar(&access.ReadToken, "token-read", "", "只读 token，留空则读取 AUTH_TOKEN_READ；和 -token-write 一起给即严格模式")
+	flag.StringVar(&access.WriteToken, "token-write", "", "读写 token，留空则读取 AUTH_TOKEN_WRITE")
+	flag.BoolVar(&access.EnableMCP, "enable-mcp", false, "严格模式下开启 /mcp 端点（需要写 token）；兼容模式总是开着")
 	flag.BoolVar(&chineseInLAConfig.Headless, "chineseinla-headless", chineseInLAConfig.Headless, "ChineseInLA 是否使用无头模式")
 	flag.IntVar(&chineseInLAConfig.CDPPort, "chineseinla-cdp-port", chineseInLAConfig.CDPPort, "ChineseInLA 专用 Chrome DevTools 端口")
 	flag.StringVar(&chineseInLAConfig.ProfileDir, "chineseinla-profile-dir", chineseInLAConfig.ProfileDir, "ChineseInLA 独立浏览器配置目录")
@@ -48,11 +53,29 @@ func main() {
 	if err := chineseinla.ValidateCookieIsolation(chineseInLAConfig.CookiePath, cookies.GetCookiesFilePath()); err != nil {
 		logrus.Fatalf("invalid cookie configuration: %v", err)
 	}
-	if token == "" {
-		token = os.Getenv("AUTH_TOKEN")
+	if access.ReadToken == "" {
+		access.ReadToken = os.Getenv("AUTH_TOKEN_READ")
+	}
+	if access.WriteToken == "" {
+		access.WriteToken = os.Getenv("AUTH_TOKEN_WRITE")
+	}
+	if access.LegacyToken == "" {
+		access.LegacyToken = os.Getenv("AUTH_TOKEN")
 	}
 
 	logrus.Infof("xiaohongshu-mcp version: %s", version)
+
+	// 鉴权和监听地址不合格就不启动，也不去下载浏览器。
+	if err := access.validate(); err != nil {
+		logrus.Fatalf("%v", err)
+	}
+	if access.strict() {
+		if err := validateListen(port); err != nil {
+			logrus.Fatalf("%v", err)
+		}
+	} else {
+		logrus.Warn("没给读、写 token：兼容模式（单 token AUTH_TOKEN、CORS、/mcp 开着）")
+	}
 
 	// 只用内置浏览器。启动时就备好，缺它直接退出，不拖到第一个请求才失败。
 	binPath, err := browser.EnsureBrowser()
@@ -84,7 +107,7 @@ func main() {
 	redditService := reddit.NewAutomation(redditConfig)
 
 	// 创建并启动应用服务器
-	appServer := NewAppServerWithServices(xiaohongshuService, chineseInLAService, redditService, token)
+	appServer := NewAppServerWithServices(xiaohongshuService, chineseInLAService, redditService, access)
 	if err := appServer.Start(port); err != nil {
 		logrus.Fatalf("failed to run server: %v", err)
 	}

@@ -52,26 +52,26 @@ type AppServer struct {
 	mcpServer          *mcp.Server
 	router             *gin.Engine
 	httpServer         *http.Server
-	authToken          string
+	access             accessConfig
 }
 
 // NewAppServer 创建新的应用服务器实例
-func NewAppServer(xiaohongshuService *XiaohongshuService, authToken string) *AppServer {
-	return NewAppServerWithServices(xiaohongshuService, nil, nil, authToken)
+func NewAppServer(xiaohongshuService *XiaohongshuService, access accessConfig) *AppServer {
+	return NewAppServerWithServices(xiaohongshuService, nil, nil, access)
 }
 
 // NewAppServerWithChineseInLA creates one MCP server hosting both Xiaohongshu
 // and ChineseInLA tools. Each service keeps its own browser configuration.
-func NewAppServerWithChineseInLA(xiaohongshuService *XiaohongshuService, chineseInLAService ChineseInLAService, authToken string) *AppServer {
-	return NewAppServerWithServices(xiaohongshuService, chineseInLAService, nil, authToken)
+func NewAppServerWithChineseInLA(xiaohongshuService *XiaohongshuService, chineseInLAService ChineseInLAService, access accessConfig) *AppServer {
+	return NewAppServerWithServices(xiaohongshuService, chineseInLAService, nil, access)
 }
 
-func NewAppServerWithServices(xiaohongshuService *XiaohongshuService, chineseInLAService ChineseInLAService, redditService RedditService, authToken string) *AppServer {
+func NewAppServerWithServices(xiaohongshuService *XiaohongshuService, chineseInLAService ChineseInLAService, redditService RedditService, access accessConfig) *AppServer {
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
 		chineseInLAService: chineseInLAService,
 		redditService:      redditService,
-		authToken:          authToken,
+		access:             access,
 	}
 
 	// 初始化 MCP Server（需要在创建 appServer 之后，因为工具注册需要访问 appServer）
