@@ -3,6 +3,7 @@ package browser
 import (
 	"fmt"
 	"net/url"
+	"runtime"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -73,6 +74,9 @@ func NewBrowser(headless bool, options ...Option) *headless_browser.Browser {
 		headless_browser.WithExtraFlags(map[string]string{"fingerprint-brand": "Chrome"}),
 	}
 	opts = append(opts, headless_browser.WithChromeBinPath(binPath))
+	// macOS 上保留浏览器沙箱；其他平台（常见于容器）沿用 --no-sandbox。
+	// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+	opts = append(opts, headless_browser.WithNoSandbox(runtime.GOOS != "darwin"))
 
 	// 代理（由调用方经 Option 传入，env 读取放在入口层）。
 	if cfg.proxy != "" {
