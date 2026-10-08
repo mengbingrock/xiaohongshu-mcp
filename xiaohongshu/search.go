@@ -111,13 +111,15 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	}
 
 	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 60s deadline，必须在其后重新 Timeout，
-	// 否则搜索页不 stable 时 MustWaitStable/MustWait 会永久挂起（无 deadline 可依赖）。
+	// 否则页面等待没有 deadline 可依赖，异常时会永久挂起。
 	page := s.page.Context(ctx).Timeout(60 * time.Second)
 
 	searchURL := makeSearchURL(keyword)
 	page.MustNavigate(searchURL)
-	page.MustWaitStable()
-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+	page.MustWaitLoad()
+	if waitSearchReady(page, 20*time.Second) == searchEmpty {
+		return []Feed{}, nil // 页面明确显示没有结果：筛选面板也不会出现，不必再等
+	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	if len(pending) > 0 {
@@ -201,6 +203,39 @@ func readFeedIDs(page *rod.Page) string {
 		return ""
 	}
 	return res.Value.Str()
+}
+
+const (
+	searchPending = ""
+	searchEmpty   = "empty"
+)
+
+// searchStateJS 读首屏搜索结果的状态："ready" 有结果、"empty" 明确无结果、"" 没到位。
+const searchStateJS = `() => {
+	const f = window.__INITIAL_STATE__?.search?.feeds;
+	const v = f ? (f.value !== undefined ? f.value : f._value) : null;
+	if (Array.isArray(v) && v.length > 0) return "ready";
+	const text = document.body?.innerText || "";
+	return text.includes("暂无相关笔记") || text.includes("没有找到相关结果") ? "empty" : "";
+}`
+
+// waitSearchReady 等首屏搜索结果注水进 __INITIAL_STATE__.search.feeds，或页面明确显示无结果。
+//
+// Modified for ycl-2004/xiaohongshu-mcp，移植自上游 PR #835、#839（修 #813）：
+// 上游导航后用 MustWaitStable，搜索页有信息流和图片懒加载、后台请求不断，等不到静止，
+// 60s deadline 整个耗在这一步；再接的 __INITIAL_STATE__ !== undefined 也不是就绪信号。
+//
+// 超时不报错：判定交给后面统一的 ErrNoFeeds，与 feeds.go 等注水的做法一致。
+func waitSearchReady(page *rod.Page, timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if res, err := page.Eval(searchStateJS); err == nil && res.Value.Str() != searchPending {
+			return res.Value.Str()
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	logrus.Warnf("等待搜索结果加载超时（%s）", timeout)
+	return searchPending
 }
 
 // waitFeedsChanged 等筛选后的数据到位。
