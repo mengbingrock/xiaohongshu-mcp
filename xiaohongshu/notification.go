@@ -165,6 +165,8 @@ func (n *NotificationAction) List(ctx context.Context, tab NotificationTab, limi
 		return nil, err
 	}
 
+	n.waitFirstPage(page, tab, 10*time.Second)
+
 	if err := n.loadUntil(ctx, page, tab, limit); err != nil {
 		return nil, err
 	}
@@ -203,6 +205,21 @@ func (n *NotificationAction) switchTab(ctx context.Context, page *rod.Page, tab 
 		return nil
 	}
 	return fmt.Errorf("未找到分区标签 %q", label)
+}
+
+// waitFirstPage 等第一页通知写进页面状态。
+//
+// Modified for ycl-2004/xiaohongshu-mcp：页面加载完时列表往往还没拉回来（页面挂载后才请求），
+// 上游这时就读状态，拿到空列表又「没有更多」，于是直接返回空（2026-10-09 实测：评论下有新回复，
+// 读了三次都是空）。这里轮询到列表里有条目为止；超时不报错，按真的没有通知处理。
+func (n *NotificationAction) waitFirstPage(page *rod.Page, tab NotificationTab, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if payload, err := n.readTab(page, tab); err == nil && len(payload.MessageList) > 0 {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 // loadUntil 滚动加载，直到条目数够用或没有更多。
