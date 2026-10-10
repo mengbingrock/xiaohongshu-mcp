@@ -1,6 +1,6 @@
 package main
 
-// Added in ycl-2004/xiaohongshu-mcp; see NOTICE. 账号状态探针和私信会话读取（都是只读）。
+// Added in ycl-2004/xiaohongshu-mcp; see NOTICE. 账号状态探针、评论楼和私信会话读取（都是只读）。
 
 import (
 	"context"
@@ -47,6 +47,43 @@ func (s *AppServer) accessProbeHandler(c *gin.Context) {
 		return
 	}
 	respondSuccess(c, result, "读取账号访问状态成功")
+}
+
+// CommentThreadRequest 读一楼评论：按评论 id 找；没有 id（人在 App 里发的）就按作者 user id 找他在这篇笔记下的第一条。
+type CommentThreadRequest struct {
+	FeedID    string `json:"feed_id" binding:"required"`
+	XsecToken string `json:"xsec_token" binding:"required"`
+	CommentID string `json:"comment_id" binding:"required_without=UserID"`
+	UserID    string `json:"user_id" binding:"required_without=CommentID"`
+}
+
+// ReadCommentThread 读一条评论所在的楼（只读）。
+func (s *XiaohongshuService) ReadCommentThread(ctx context.Context, feedID, xsecToken, commentID, userID string) (*xiaohongshu.CommentThread, error) {
+	b := newBrowser()
+	defer b.Close()
+	page := b.NewPage()
+	defer page.Close()
+
+	return xiaohongshu.NewFeedDetailAction(page).ReadThread(ctx, feedID, xsecToken, commentID, userID)
+}
+
+// commentThreadHandler 处理 [POST /api/v1/feeds/comment/thread]：找不到评论返回 404 COMMENT_NOT_FOUND。
+func (s *AppServer) commentThreadHandler(c *gin.Context) {
+	var req CommentThreadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "请求参数错误", err.Error())
+		return
+	}
+	result, err := s.xiaohongshuService.ReadCommentThread(c.Request.Context(), req.FeedID, req.XsecToken, req.CommentID, req.UserID)
+	if errors.Is(err, xiaohongshu.ErrCommentNotFound) {
+		respondError(c, http.StatusNotFound, "COMMENT_NOT_FOUND", "没找到这条评论", err.Error())
+		return
+	}
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "COMMENT_THREAD_FAILED", "读取评论楼失败", err)
+		return
+	}
+	respondSuccess(c, result, "读取评论楼成功")
 }
 
 // ChatConversationsResponse 私信会话列表：平台响应原样返回。

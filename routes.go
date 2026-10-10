@@ -60,6 +60,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		read.GET("/access/probe", appServer.accessProbeHandler)
 		read.POST("/feeds/search", appServer.searchFeedsHandler)
 		read.POST("/feeds/detail", appServer.getFeedDetailHandler)
+		read.POST("/feeds/comment/thread", appServer.commentThreadHandler)
 		read.POST("/user/profile", appServer.userProfileHandler)
 		read.GET("/user/me", appServer.myProfileHandler)
 		read.GET("/notifications/unread", appServer.getUnreadCountHandler)

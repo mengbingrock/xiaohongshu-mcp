@@ -266,6 +266,14 @@ type Comment struct {
 	SubCommentCount string    `json:"subCommentCount"`
 	SubComments     []Comment `json:"subComments"`
 	ShowTags        []string  `json:"showTags"`
+	// TargetComment 楼中楼里被回复的那条（Modified for ycl-2004/xiaohongshu-mcp）。直接回楼主时页面不给。
+	TargetComment *CommentTarget `json:"targetComment,omitempty"`
+}
+
+// CommentTarget 被回复的评论：只有 id 和作者。
+type CommentTarget struct {
+	ID       string `json:"id"`
+	UserInfo User   `json:"userInfo"`
 }
 
 // UserProfileResponse 用户详情页完整响应
