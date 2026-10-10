@@ -63,12 +63,10 @@ func ReplyInConversation(ctx context.Context, page *rod.Page, userID, content, k
 	if _, err := openConversation(ctx, page, capture, userID); err != nil {
 		return nil, err
 	}
-	found, err := page.Timeout(5 * time.Second).Element(chatEditor)
+	editor, err := findUntimed(page, func(p *rod.Page) (*rod.Element, error) { return p.Element(chatEditor) })
 	if err != nil {
 		return nil, &InteractionError{Stage: "editor", State: StateNotSent, Cause: fmt.Errorf("没有找到私信输入框: %w", err)}
 	}
-	// 找元素的 5 秒期限会跟着元素走：输入要十几秒，之后再在输入框里按回车就超时了（2026-10-10 实测）。
-	editor := found.CancelTimeout()
 	if err := humanize.Click(editor); err != nil {
 		return nil, &InteractionError{Stage: "editor", State: StateNotSent, Cause: err}
 	}
@@ -103,7 +101,9 @@ func openConversation(ctx context.Context, page *rod.Page, capture *imCapture, u
 	humanize.Delay(ctx, humanize.Reading)
 
 	seen := capture.count(historyPath)
-	item, err := p.Timeout(5 * time.Second).ElementByJS(rod.Eval(conversationItemJS, nickname))
+	item, err := findUntimed(p, func(q *rod.Page) (*rod.Element, error) {
+		return q.ElementByJS(rod.Eval(conversationItemJS, nickname))
+	})
 	if err != nil || item == nil {
 		return nil, fmt.Errorf("会话列表里找不到昵称是 %q 的会话", nickname)
 	}
@@ -153,8 +153,10 @@ const conversationItemJS = `(name) => {
 
 // sendTyped 发出输入框里的文字：输入后出现的「发送」按钮优先，没有就在输入框里按回车。
 func sendTyped(page *rod.Page, editor *rod.Element) error {
-	if found, err := page.Timeout(3*time.Second).ElementR(".xhs-im-input-bar button, .xhs-im-input-bar [role=button]", `^\s*发送\s*$`); err == nil {
-		button := found.CancelTimeout() // 找元素的期限不带到点击（见 ReplyInConversation）
+	sendButton := func(p *rod.Page) (*rod.Element, error) {
+		return p.ElementR(".xhs-im-input-bar button, .xhs-im-input-bar [role=button]", `^\s*发送\s*$`)
+	}
+	if button, err := findUntimedWithin(page, 3*time.Second, sendButton); err == nil {
 		if err := settle(button); err == nil {
 			return humanize.Click(button)
 		}
@@ -163,6 +165,21 @@ func sendTyped(page *rod.Page, editor *rod.Element) error {
 		return err
 	}
 	return page.Keyboard.Press(input.Enter)
+}
+
+// findUntimed 最多等 5 秒找元素，找到后换绑到不带期限的页面上再交出去。rod 的元素会记住找到它时的页面
+// （连同期限），之后的点击、移动鼠标、按键都走那个页面：期限一过就超时，取消期限又会把那个页面一起取消
+// （2026-10-10 实测两次：「context deadline exceeded」「context canceled」，私信都没发出）。
+func findUntimed(page *rod.Page, find func(*rod.Page) (*rod.Element, error)) (*rod.Element, error) {
+	return findUntimedWithin(page, 5*time.Second, find)
+}
+
+func findUntimedWithin(page *rod.Page, wait time.Duration, find func(*rod.Page) (*rod.Element, error)) (*rod.Element, error) {
+	found, err := find(page.Timeout(wait))
+	if err != nil {
+		return nil, err
+	}
+	return page.ElementFromObject(found.Object)
 }
 
 // ---- 解析（纯函数，单测覆盖）----

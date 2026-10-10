@@ -133,11 +133,10 @@ func openDeleteConfirm(ctx context.Context, page *rod.Page, el *rod.Element) (*r
 	if err := humanize.Click(more); err != nil {
 		return nil, fmt.Errorf("点「…」失败: %w", err)
 	}
-	found, err := page.Timeout(5 * time.Second).ElementByJS(rod.Eval(commentDeleteMenuJS))
+	menu, err := findUntimed(page, func(p *rod.Page) (*rod.Element, error) { return p.ElementByJS(rod.Eval(commentDeleteMenuJS)) })
 	if err != nil {
 		return nil, fmt.Errorf("菜单里没有「删除评论」：可能不是本账号的评论")
 	}
-	menu := found.CancelTimeout() // 找元素的期限不带到等待和点击：等停稳最多要几秒
 
 	// 菜单弹出时有淡入动画，透明度没到位就点会被拒（2026-10-10 实测）：等它停稳。
 	if err := settle(menu); err != nil {
@@ -159,15 +158,16 @@ const commentDeleteMenuJS = `() => {
 // deleteConfirmButton 「确认删除此评论」弹窗里的「确定」。只在这个弹窗里找，不点任何通用的「确定」；
 // 弹窗还在动画时坐标会变，等它停稳再交给调用方点（点歪了会关掉弹窗而不发删除请求）。
 func deleteConfirmButton(page *rod.Page) (*rod.Element, error) {
-	dialog, err := page.Timeout(5*time.Second).ElementR(".reds-alert", `确认删除此评论`)
+	button, err := findUntimed(page, func(p *rod.Page) (*rod.Element, error) {
+		dialog, err := p.ElementR(".reds-alert", `确认删除此评论`)
+		if err != nil {
+			return nil, fmt.Errorf("没有出现删除确认弹窗")
+		}
+		return dialog.ElementR(".reds-alert-footer .foot-btn.strong", `^(确定|确认)$`)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("没有出现删除确认弹窗")
+		return nil, fmt.Errorf("删除确认弹窗里没有「确定」: %w", err)
 	}
-	found, err := dialog.ElementR(".reds-alert-footer .foot-btn.strong", `^(确定|确认)$`)
-	if err != nil {
-		return nil, fmt.Errorf("删除确认弹窗里没有「确定」")
-	}
-	button := found.CancelTimeout() // 调用方之后才点：不能带着找弹窗时的 5 秒期限
 	if err := settle(button); err != nil {
 		return nil, fmt.Errorf("删除确认弹窗没有停稳: %w", err)
 	}
