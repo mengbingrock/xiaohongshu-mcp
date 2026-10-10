@@ -181,6 +181,13 @@ type submissionObserver struct {
 }
 
 func observeSubmission(page *rod.Page, endpoint, feedID, content string) *submissionObserver {
+	return observeSubmissionMatching(page, endpoint, feedID, content, func(body string) bool {
+		return matchesSubmission(body, feedID, content)
+	})
+}
+
+// observeSubmissionMatching 同 observeSubmission，但由 match 决定哪个请求是这次的提交（删除评论要同时核对笔记和评论 id）。
+func observeSubmissionMatching(page *rod.Page, endpoint, feedID, content string, match func(string) bool) *submissionObserver {
 	ctx, cancel := context.WithCancel(page.GetContext())
 	p := page.Context(ctx)
 	o := &submissionObserver{cancel: cancel, done: make(chan struct{})}
@@ -212,7 +219,7 @@ func observeSubmission(page *rod.Page, endpoint, feedID, content string) *submis
 				}
 				body = r.PostData
 			}
-			if !matchesSubmission(body, feedID, content) {
+			if !match(body) {
 				return
 			}
 			requests[e.RequestID] = pendingResponse{field: submissionTargetField(body, feedID)}

@@ -87,6 +87,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		write.POST("/feeds/favorite", appServer.favoriteFeedHandler)
 		write.POST("/notifications/reply", appServer.replyNotificationHandler)
 		write.POST("/notifications/like", appServer.likeNotificationHandler)
+		write.POST("/feeds/comment/delete", appServer.deleteCommentHandler)
 	}
 
 	return router

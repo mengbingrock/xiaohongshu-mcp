@@ -15,6 +15,6 @@ Changes in this distribution (branch ma/patches) include: separate read and writ
 loopback-only listening, MCP endpoint off by default, no CORS, reduced HTTP routes, private
 atomic cookie writes, one browser operation at a time, browser sandbox kept on macOS,
 structured timeout and page-access error codes, comment submission receipts with idempotency
-keys, reply attribution on notifications, reading one comment thread with its replies, read-only private message listing, and search
+keys, reply attribution on notifications, reading one comment thread with its replies, deleting the account's own comment (ported from liaogx), read-only private message listing, and search
 waiting for result hydration instead of full-page stability (ported from upstream PRs #835 and #839).
 Original authors are not responsible for these modifications.

@@ -290,6 +290,7 @@ func TestStrictRoutesRegistered(t *testing.T) {
 		"POST /api/v1/publish",
 		"POST /api/v1/feeds/comment",
 		"POST /api/v1/feeds/comment/reply",
+		"POST /api/v1/feeds/comment/delete",
 	} {
 		assert.True(t, registered[want], "路由 %s 应已注册", want)
 	}
