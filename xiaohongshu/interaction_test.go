@@ -47,6 +47,11 @@ func TestSubmissionRequestCorrelation(t *testing.T) {
 	require.False(t, matchesSubmission(`{"note_id":"fixture-note","content":"different text"}`, "fixture-note", "fixture text"))
 	require.True(t, matchesSubmission(`{"note_oid":"fixture-note"}`, "fixture-note", ""))
 	require.False(t, matchesSubmission(`{"success":true}`, "fixture-note", ""))
+	// 网页提交时吞掉换行：正文只差空白也算同一条
+	require.True(t, matchesSubmission(`{"note_id":"fixture-note","content":"第一行第二行"}`, "fixture-note", "第一行\n第二行"))
+	r := parseSubmissionResponse(200, []byte(`{"success":true,"data":{"comment":{"id":"c1","content":"第一行第二行"}}}`), "fixture-note", "第一行\n第二行")
+	require.Equal(t, StateConfirmed, r.State)
+	require.Equal(t, "c1", r.CommentID)
 }
 
 func TestRejectionError(t *testing.T) {

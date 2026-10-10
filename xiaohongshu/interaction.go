@@ -279,9 +279,15 @@ func matchesSubmission(body, feedID, content string) bool {
 	}
 	if content != "" {
 		text, _ := v["content"].(string)
-		return text == content
+		return sameText(text, content)
 	}
 	return true
+}
+
+// sameText 正文比对忽略所有空白：网页提交时会吞掉换行（2026-10-10 实测，正文带换行的回复
+// 发出去了却因为对不上记成结果不明）。和 Marketing_Agent 认我们评论的正文 hash 是同一个规则。
+func sameText(a, b string) bool {
+	return strings.Join(strings.Fields(a), "") == strings.Join(strings.Fields(b), "")
 }
 
 func submissionTargetField(body, feedID string) string {
@@ -340,7 +346,7 @@ func parseSubmissionResponse(status int, body []byte, feedID, content string) In
 	}
 	if content != "" {
 		c := v.Data.Comment
-		if c.Content != "" && c.Content != content || c.NoteID != "" && c.NoteID != feedID {
+		if c.Content != "" && !sameText(c.Content, content) || c.NoteID != "" && c.NoteID != feedID {
 			return r
 		}
 		r.CommentID = c.ID
