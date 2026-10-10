@@ -63,10 +63,12 @@ func ReplyInConversation(ctx context.Context, page *rod.Page, userID, content, k
 	if _, err := openConversation(ctx, page, capture, userID); err != nil {
 		return nil, err
 	}
-	editor, err := page.Timeout(5 * time.Second).Element(chatEditor)
+	found, err := page.Timeout(5 * time.Second).Element(chatEditor)
 	if err != nil {
 		return nil, &InteractionError{Stage: "editor", State: StateNotSent, Cause: fmt.Errorf("没有找到私信输入框: %w", err)}
 	}
+	// 找元素的 5 秒期限会跟着元素走：输入要十几秒，之后再在输入框里按回车就超时了（2026-10-10 实测）。
+	editor := found.CancelTimeout()
 	if err := humanize.Click(editor); err != nil {
 		return nil, &InteractionError{Stage: "editor", State: StateNotSent, Cause: err}
 	}
@@ -151,7 +153,8 @@ const conversationItemJS = `(name) => {
 
 // sendTyped 发出输入框里的文字：输入后出现的「发送」按钮优先，没有就在输入框里按回车。
 func sendTyped(page *rod.Page, editor *rod.Element) error {
-	if button, err := page.Timeout(3*time.Second).ElementR(".xhs-im-input-bar button, .xhs-im-input-bar [role=button]", `^\s*发送\s*$`); err == nil {
+	if found, err := page.Timeout(3*time.Second).ElementR(".xhs-im-input-bar button, .xhs-im-input-bar [role=button]", `^\s*发送\s*$`); err == nil {
+		button := found.CancelTimeout() // 找元素的期限不带到点击（见 ReplyInConversation）
 		if err := settle(button); err == nil {
 			return humanize.Click(button)
 		}
