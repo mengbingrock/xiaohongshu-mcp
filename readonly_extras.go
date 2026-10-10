@@ -1,6 +1,6 @@
 package main
 
-// Added in ycl-2004/xiaohongshu-mcp; see NOTICE. 账号状态探针、评论楼和私信会话读取（都是只读）。
+// Added in ycl-2004/xiaohongshu-mcp; see NOTICE. 账号状态探针、评论楼、私信会话读取和私信页探查（都是只读）。
 
 import (
 	"context"
@@ -113,4 +113,34 @@ func (s *AppServer) chatConversationsHandler(c *gin.Context) {
 		return
 	}
 	respondSuccess(c, result, "读取私信会话成功")
+}
+
+// ChatInspectRequest 私信页探查：nickname 给了就点开这个昵称的会话。
+type ChatInspectRequest struct {
+	Nickname string `json:"nickname"`
+}
+
+// InspectChat 私信页只读探查（写私信读取和回复之前看清页面结构和接口）。
+func (s *XiaohongshuService) InspectChat(ctx context.Context, nickname string) (*xiaohongshu.ChatInspection, error) {
+	b := newBrowser()
+	defer b.Close()
+	page := b.NewPage()
+	defer page.Close()
+
+	return xiaohongshu.InspectChat(ctx, page, nickname)
+}
+
+// chatInspectHandler 处理 [POST /api/v1/chat/inspect]。
+func (s *AppServer) chatInspectHandler(c *gin.Context) {
+	var req ChatInspectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "请求参数错误", err.Error())
+		return
+	}
+	result, err := s.xiaohongshuService.InspectChat(c.Request.Context(), req.Nickname)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "CHAT_INSPECT_FAILED", "私信页探查失败", err)
+		return
+	}
+	respondSuccess(c, result, "私信页探查完成")
 }
