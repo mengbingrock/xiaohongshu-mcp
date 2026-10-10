@@ -37,6 +37,7 @@ var ErrConversationNotFound = errors.New("没有和这个人的会话")
 // ChatMessages 一个会话最近的消息：网页自己拉到的 /api/im/web/messages/history 响应原样返回，字段解析交给调用方。
 type ChatMessages struct {
 	UserID   string          `json:"user_id"`
+	SelfID   string          `json:"self_id"` // 我们自己（会话列表里的 user_id）
 	Nickname string          `json:"nickname"`
 	Raw      json.RawMessage `json:"raw"`
 }
@@ -76,14 +77,42 @@ func ReplyInConversation(ctx context.Context, page *rod.Page, userID, content, k
 	}
 	humanize.Delay(ctx, humanize.AfterType)
 
-	before := len(capture.requestLog())
+	before, sentAfter := len(capture.requestLog()), time.Now().Add(-time.Minute) // 留一分钟给两边时钟误差
 	onPath := func(path string) bool { return strings.HasPrefix(path, imPathPrefix) }
 	observer := observeSubmissionMatching(page, onPath, "", content, func(body string) bool {
 		return dmRequestMatches(body, userID, content)
 	})
 	receipt, err := submitObserved(page, observer, key, func() error { return sendTyped(page, editor) })
 	logrus.Infof("私信发送前后的 /api/im/ 请求: %v", capture.requestLog()[before:])
-	return receipt, err
+	if !unconfirmed(err) {
+		return receipt, err
+	}
+	// 网页发私信走 WebSocket，普通请求里看不到（2026-10-10 实测）：重新打开会话，按历史消息确认。
+	humanize.Delay(ctx, humanize.Reading)
+	reopened, reopenErr := openConversation(ctx, page, capture, userID)
+	if reopenErr != nil {
+		logrus.Warnf("重新打开会话核对私信失败: %v", reopenErr)
+		return receipt, err
+	}
+	id, ok := ownMessage(reopened.Raw, reopened.SelfID, content, sentAfter)
+	if !ok {
+		return receipt, err
+	}
+	confirmed := InteractionReceipt{State: StateConfirmed, CommentID: id}
+	if writeErr := finishReceipt(key, confirmed); writeErr != nil {
+		logrus.WithField("key", key).Error("回执改写失败，保留「结果不明」记录")
+		return receipt, err
+	}
+	logrus.Infof("私信已按历史消息确认发出: %s", id)
+	return &confirmed, nil
+}
+
+// unconfirmed 提交了、没认出发送请求、也没被拦或被拒：值得重新打开会话核对一次。
+func unconfirmed(err error) bool {
+	var interaction *InteractionError
+	var access *PageAccessError
+	return errors.As(err, &interaction) && interaction.Stage == "confirm" && interaction.State == StateUnknown &&
+		!errors.As(err, &access)
 }
 
 // openConversation 打开私信页，点开和 userID 的已有会话，返回历史消息。页面上没有 user id：先从会话列表接口
@@ -94,10 +123,11 @@ func openConversation(ctx context.Context, page *rod.Page, capture *imCapture, u
 	if err != nil {
 		return nil, err
 	}
-	nickname, err := conversationNickname(list, userID)
+	chat, err := findChat(list, userID)
 	if err != nil {
 		return nil, err
 	}
+	nickname := chat.Info.Nickname
 	humanize.Delay(ctx, humanize.Reading)
 
 	seen := capture.count(historyPath)
@@ -124,7 +154,7 @@ func openConversation(ctx context.Context, page *rod.Page, capture *imCapture, u
 	if !historyFits(history, userID) {
 		return nil, fmt.Errorf("打开的会话里的消息不是和 %s 的", userID)
 	}
-	return &ChatMessages{UserID: userID, Nickname: nickname, Raw: history}, nil
+	return &ChatMessages{UserID: userID, SelfID: chat.UserID, Nickname: nickname, Raw: history}, nil
 }
 
 // openChatPage 打开私信页，等到会话列表（/api/im/web/v3/chats）并返回它的原文。没等到先看是不是被拦了。
@@ -184,40 +214,73 @@ func findUntimedWithin(page *rod.Page, wait time.Duration, find func(*rod.Page) 
 
 // ---- 解析（纯函数，单测覆盖）----
 
-type chatList struct {
-	Data struct {
-		Chats []struct {
-			ChatUserID string `json:"chat_user_id"`
-			Info       struct {
-				Nickname string `json:"nickname"`
-			} `json:"info"`
-		} `json:"chats"`
-	} `json:"data"`
+type chatEntry struct {
+	ChatUserID string `json:"chat_user_id"` // 对方
+	UserID     string `json:"user_id"`      // 我们自己
+	Info       struct {
+		Nickname string `json:"nickname"`
+	} `json:"info"`
 }
 
-// conversationNickname 会话列表里和 userID 的会话的昵称。没有这个会话 → ErrConversationNotFound；
+// findChat 会话列表里和 userID 的会话。没有这个会话 → ErrConversationNotFound；
 // 昵称为空或和别的会话重名 → 报错（按昵称点开会点错人）。
-func conversationNickname(list json.RawMessage, userID string) (string, error) {
-	var v chatList
-	if err := json.Unmarshal(list, &v); err != nil {
-		return "", fmt.Errorf("解析私信会话列表失败: %w", err)
+func findChat(list json.RawMessage, userID string) (chatEntry, error) {
+	var v struct {
+		Data struct {
+			Chats []chatEntry `json:"chats"`
+		} `json:"data"`
 	}
-	found, nickname, names := false, "", map[string]int{}
-	for _, chat := range v.Data.Chats {
+	if err := json.Unmarshal(list, &v); err != nil {
+		return chatEntry{}, fmt.Errorf("解析私信会话列表失败: %w", err)
+	}
+	var found *chatEntry
+	names := map[string]int{}
+	for i, chat := range v.Data.Chats {
 		names[chat.Info.Nickname]++
 		if chat.ChatUserID == userID {
-			found, nickname = true, chat.Info.Nickname
+			found = &v.Data.Chats[i]
 		}
 	}
 	switch {
-	case !found:
-		return "", ErrConversationNotFound
-	case nickname == "":
-		return "", fmt.Errorf("和 %s 的会话没有昵称，没法在页面上点开", userID)
-	case names[nickname] > 1:
-		return "", fmt.Errorf("有 %d 个会话的昵称都是 %q，不按昵称点开", names[nickname], nickname)
+	case found == nil:
+		return chatEntry{}, ErrConversationNotFound
+	case found.Info.Nickname == "":
+		return chatEntry{}, fmt.Errorf("和 %s 的会话没有昵称，没法在页面上点开", userID)
+	case names[found.Info.Nickname] > 1:
+		return chatEntry{}, fmt.Errorf("有 %d 个会话的昵称都是 %q，不按昵称点开", names[found.Info.Nickname], found.Info.Nickname)
 	}
-	return nickname, nil
+	return *found, nil
+}
+
+// ownMessage 历史消息里我们（selfID）在 since 之后发的、正文和 content 一致（忽略空白）的文字消息，返回它的 id。
+// 网页发私信走 WebSocket，看不到发送请求：重新打开会话后按这个确认真的发出去了（平台那边的记录）。
+func ownMessage(history json.RawMessage, selfID, content string, since time.Time) (string, bool) {
+	var v struct {
+		Data struct {
+			Messages []struct {
+				ID        string `json:"id"`
+				SenderID  string `json:"sender_id"`
+				CreatedAt int64  `json:"created_at"`
+				Content   string `json:"content"`
+			} `json:"out_message_list"`
+		} `json:"data"`
+	}
+	if selfID == "" || json.Unmarshal(history, &v) != nil {
+		return "", false
+	}
+	for _, m := range v.Data.Messages {
+		var body struct {
+			Type    int    `json:"content_type"`
+			Content string `json:"content"`
+		}
+		if m.SenderID != selfID || time.UnixMilli(m.CreatedAt).Before(since) || json.Unmarshal([]byte(m.Content), &body) != nil {
+			continue
+		}
+		if body.Type == 1 && sameText(body.Content, content) {
+			return m.ID, true
+		}
+	}
+	return "", false
 }
 
 // historyFits 历史消息都在我们和 userID 之间（每条的发送方或接收方是他）。没有消息时无从核对，交给窗口标题。
