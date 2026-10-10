@@ -144,3 +144,37 @@ func (s *AppServer) chatInspectHandler(c *gin.Context) {
 	}
 	respondSuccess(c, result, "私信页探查完成")
 }
+
+// ChatMessagesRequest 读和 user_id 的已有会话里最近的消息。
+type ChatMessagesRequest struct {
+	UserID string `json:"user_id" binding:"required"`
+}
+
+// ReadChatMessages 读一个已有会话的消息（只读；点开会话会让消息标为已读）。
+func (s *XiaohongshuService) ReadChatMessages(ctx context.Context, userID string) (*xiaohongshu.ChatMessages, error) {
+	b := newBrowser()
+	defer b.Close()
+	page := b.NewPage()
+	defer page.Close()
+
+	return xiaohongshu.ReadMessages(ctx, page, userID)
+}
+
+// chatMessagesHandler 处理 [POST /api/v1/chat/messages]。没有这个会话 404 CONVERSATION_NOT_FOUND（不新建会话）。
+func (s *AppServer) chatMessagesHandler(c *gin.Context) {
+	var req ChatMessagesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "请求参数错误", err.Error())
+		return
+	}
+	result, err := s.xiaohongshuService.ReadChatMessages(c.Request.Context(), req.UserID)
+	if errors.Is(err, xiaohongshu.ErrConversationNotFound) {
+		respondError(c, http.StatusNotFound, "CONVERSATION_NOT_FOUND", "没有和这个人的私信会话", err.Error())
+		return
+	}
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "CHAT_READ_FAILED", "读取私信消息失败", err)
+		return
+	}
+	respondSuccess(c, result, "读取私信消息成功")
+}

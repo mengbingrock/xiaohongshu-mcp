@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -47,7 +48,8 @@ func (f *CommentFeedAction) DeleteOwnComment(ctx context.Context, feedID, xsecTo
 		return nil, &InteractionError{Stage: "prepare", State: StateNotSent, Cause: err}
 	}
 
-	observer := observeSubmissionMatching(page, commentDeleteEndpoint, feedID, "", func(body string) bool {
+	onPath := func(path string) bool { return strings.HasSuffix(path, commentDeleteEndpoint) }
+	observer := observeSubmissionMatching(page, onPath, feedID, "", func(body string) bool {
 		return deleteRequestMatches(body, feedID, commentID)
 	})
 	defer observer.close()

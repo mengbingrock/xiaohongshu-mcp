@@ -68,6 +68,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		read.POST("/notifications/list", appServer.listNotificationsHandler)
 		read.GET("/chat/conversations", appServer.chatConversationsHandler)
 		read.POST("/chat/inspect", appServer.chatInspectHandler)
+		read.POST("/chat/messages", appServer.chatMessagesHandler)
 	}
 
 	// 写路由：严格模式下只认写 token。登录也算写：它会换掉这个号的会话
@@ -89,6 +90,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		write.POST("/notifications/reply", appServer.replyNotificationHandler)
 		write.POST("/notifications/like", appServer.likeNotificationHandler)
 		write.POST("/feeds/comment/delete", appServer.deleteCommentHandler)
+		write.POST("/chat/reply", appServer.chatReplyHandler)
 	}
 
 	return router

@@ -181,13 +181,15 @@ type submissionObserver struct {
 }
 
 func observeSubmission(page *rod.Page, endpoint, feedID, content string) *submissionObserver {
-	return observeSubmissionMatching(page, endpoint, feedID, content, func(body string) bool {
+	onPath := func(path string) bool { return strings.HasSuffix(path, endpoint) }
+	return observeSubmissionMatching(page, onPath, feedID, content, func(body string) bool {
 		return matchesSubmission(body, feedID, content)
 	})
 }
 
-// observeSubmissionMatching 同 observeSubmission，但由 match 决定哪个请求是这次的提交（删除评论要同时核对笔记和评论 id）。
-func observeSubmissionMatching(page *rod.Page, endpoint, feedID, content string, match func(string) bool) *submissionObserver {
+// observeSubmissionMatching 同 observeSubmission，但由 onPath（请求路径）和 match（请求体）决定哪个请求是
+// 这次的提交：删除评论要同时核对笔记和评论 id；私信的发送接口只知道在 /api/im/ 下面。
+func observeSubmissionMatching(page *rod.Page, onPath func(string) bool, feedID, content string, match func(string) bool) *submissionObserver {
 	ctx, cancel := context.WithCancel(page.GetContext())
 	p := page.Context(ctx)
 	o := &submissionObserver{cancel: cancel, done: make(chan struct{})}
@@ -208,7 +210,7 @@ func observeSubmissionMatching(page *rod.Page, endpoint, feedID, content string,
 				return
 			}
 			u, err := url.Parse(e.Request.URL)
-			if err != nil || !strings.HasSuffix(u.Path, endpoint) {
+			if err != nil || !onPath(u.Path) {
 				return
 			}
 			body := e.Request.PostData
@@ -412,6 +414,11 @@ func awaitSubmission(page *rod.Page, observer *submissionObserver, timeout time.
 // 在它之前出错的步骤都算「还没发出」。
 func submitWithReceipt(ctx context.Context, page *rod.Page, submit *rod.Element, key, feedID, content string) (*InteractionReceipt, error) {
 	observer := observeSubmission(page, commentEndpoint, feedID, content)
+	return submitObserved(page, observer, key, func() error { return humanize.Click(submit) })
+}
+
+// submitObserved 同 submitWithReceipt，但由调用方给出观察器和触发发送的动作（点按钮或按回车）。
+func submitObserved(page *rod.Page, observer *submissionObserver, key string, trigger func() error) (*InteractionReceipt, error) {
 	defer observer.close()
 	if observer.setupErr != nil {
 		return nil, &InteractionError{Stage: "response_observer", State: StateNotSent, Cause: observer.setupErr}
@@ -426,10 +433,10 @@ func submitWithReceipt(ctx context.Context, page *rod.Page, submit *rod.Element,
 	result := InteractionReceipt{State: StateUnknown}
 	defer func() {
 		if err := finishReceipt(key, result); err != nil {
-			logrus.WithField("feed_id", feedID).Error("回执写入失败，保留原「结果不明」记录")
+			logrus.WithField("key", key).Error("回执写入失败，保留原「结果不明」记录")
 		}
 	}()
-	if err := humanize.Click(submit); err != nil {
+	if err := trigger(); err != nil {
 		// 点击是否送达说不准，按结果不明处理。
 		return nil, &InteractionError{Stage: "click", State: StateUnknown, Cause: err}
 	}
