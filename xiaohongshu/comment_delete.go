@@ -135,6 +135,10 @@ func openDeleteConfirm(ctx context.Context, page *rod.Page, el *rod.Element) (*r
 	if err != nil {
 		return nil, fmt.Errorf("菜单里没有「删除评论」：可能不是本账号的评论")
 	}
+	// 菜单弹出时有淡入动画，透明度没到位就点会被拒（2026-10-10 实测）：等它停稳。
+	if err := settle(menu); err != nil {
+		return nil, fmt.Errorf("「删除评论」菜单没有停稳: %w", err)
+	}
 	if err := humanize.Click(menu); err != nil {
 		return nil, fmt.Errorf("点「删除评论」失败: %w", err)
 	}
@@ -159,8 +163,17 @@ func deleteConfirmButton(page *rod.Page) (*rod.Element, error) {
 	if err != nil {
 		return nil, fmt.Errorf("删除确认弹窗里没有「确定」")
 	}
-	stable := button.Timeout(3 * time.Second)
-	err = stable.Wait(rod.Eval(`function() {
+	if err := settle(button); err != nil {
+		return nil, fmt.Errorf("删除确认弹窗没有停稳: %w", err)
+	}
+	return button, nil
+}
+
+// settle 等元素和它所有祖先的动画都放完、位置不再变、完全显示出来（最多 3 秒）。弹出的菜单和弹窗
+// 都有淡入动画，没停稳就点会被点击函数当成不可命中，或者点歪。
+func settle(el *rod.Element) error {
+	stable := el.Timeout(3 * time.Second)
+	err := stable.Wait(rod.Eval(`function() {
 		for (let node = this; node; node = node.parentElement) {
 			for (const animation of node.getAnimations?.() || []) {
 				if (animation.pending || animation.playState === 'running') return false;
@@ -172,9 +185,14 @@ func deleteConfirmButton(page *rod.Page) (*rod.Element, error) {
 		err = stable.WaitStable(200 * time.Millisecond)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("删除确认弹窗没有停稳")
+		return err
 	}
-	return button, nil
+	for deadline := time.Now().Add(3 * time.Second); !humanize.Visible(el); time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("一直没有完全显示出来")
+		}
+	}
+	return nil
 }
 
 // deleteRequestMatches 网页发出的删除请求是不是删这条：笔记和评论 id 都要对上。请求参数可能是驼峰
