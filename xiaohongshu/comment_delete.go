@@ -41,8 +41,9 @@ func (f *CommentFeedAction) DeleteOwnComment(ctx context.Context, feedID, xsecTo
 	if err := checkOwnComment(page, feedID, commentID); err != nil {
 		return nil, err
 	}
-	button, err := openDeleteConfirm(page, el)
+	button, err := openDeleteConfirm(ctx, page, el)
 	if err != nil {
+		logrus.Warnf("删除评论没有发出（准备阶段）: feed=%s comment=%s: %v", feedID, commentID, err)
 		return nil, &InteractionError{Stage: "prepare", State: StateNotSent, Cause: err}
 	}
 
@@ -112,20 +113,30 @@ func judgeOwnership(proof commentProof) error {
 }
 
 // openDeleteConfirm 点评论的「…」→「删除评论」，返回确认弹窗里的「确定」（还没点）。
-func openDeleteConfirm(page *rod.Page, el *rod.Element) (*rod.Element, error) {
+// 「…」平时是透明的，鼠标移到评论上才显示：先滚到评论、移上去，再点（2026-10-10 实测，
+// 直接点报「元素当前不可命中」）。
+func openDeleteConfirm(ctx context.Context, page *rod.Page, el *rod.Element) (*rod.Element, error) {
+	if err := el.ScrollIntoView(); err != nil {
+		return nil, fmt.Errorf("滚到评论失败: %w", err)
+	}
+	humanize.Delay(ctx, humanize.BetweenScroll)
+	if err := humanize.Hover(el); err != nil {
+		return nil, fmt.Errorf("鼠标移到评论上失败: %w", err)
+	}
+	humanize.Delay(ctx, humanize.PointerSettle)
 	more, err := el.Timeout(5 * time.Second).Element(".more")
 	if err != nil {
 		return nil, fmt.Errorf("评论没有「…」菜单")
 	}
 	if err := humanize.Click(more); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("点「…」失败: %w", err)
 	}
 	menu, err := page.Timeout(5 * time.Second).ElementByJS(rod.Eval(commentDeleteMenuJS))
 	if err != nil {
 		return nil, fmt.Errorf("菜单里没有「删除评论」：可能不是本账号的评论")
 	}
 	if err := humanize.Click(menu); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("点「删除评论」失败: %w", err)
 	}
 	return deleteConfirmButton(page)
 }
