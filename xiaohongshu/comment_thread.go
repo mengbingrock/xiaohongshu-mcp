@@ -12,13 +12,14 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
 // ErrCommentNotFound 页面上找不到要读的那条评论：被删了，或评论区太大、在时限内没翻到。
 var ErrCommentNotFound = errors.New("评论不在页面上")
 
-// maxThreadExpandRounds 一楼最多点几次「展开 N 条回复」。每次展开约十条，读回复用不着更多；
+// maxThreadExpandRounds 一楼最多展开几轮。每次展开约十条，读回复用不着更多；
 // 也给整个请求的耗时封顶（调用方 180 秒超时，查找评论本身最多 90 秒）。
 const maxThreadExpandRounds = 5
 
@@ -53,7 +54,7 @@ func (f *FeedDetailAction) ReadThread(ctx context.Context, feedID, xsecToken, co
 	if err != nil {
 		return nil, err
 	}
-	expandThread(ctx, page, rootID)
+	expandThread(ctx, page, feedID, rootID)
 	return readThreadState(page, feedID, rootID)
 }
 
@@ -74,21 +75,49 @@ func threadRootID(el *rod.Element) (string, error) {
 	return rootID, nil
 }
 
-// expandThread 反复点这一楼里的「展开 N 条回复」，直到没有可点的或到轮数上限。返回点开的次数。
-func expandThread(ctx context.Context, page *rod.Page, rootID string) int {
+// expandThread 把这一楼折叠的回复展开，直到页面状态里的回复条数够了、没有可点的按钮，或到轮数上限。
+// 返回点开的次数。以结果（页面状态里的条数）为准，不以找没找到按钮为准：2026-10-10 实测，以楼主为锚点
+// 时只在楼里找按钮一个都没找到，只读回第一条回复；找评论时展开视野里的按钮那套却能读全。所以每轮先把
+// 楼末滚进视野（按钮在楼末），楼里找不到按钮就展开视野里的。
+func expandThread(ctx context.Context, page *rod.Page, feedID, rootID string) int {
 	clicked := 0
-	for clicked < maxThreadExpandRounds {
-		button := threadExpandButton(page, rootID)
-		if button == nil {
+	for round := 0; round < maxThreadExpandRounds; round++ {
+		if thread, err := readThreadState(page, feedID, rootID); err == nil && thread.Complete {
 			break
 		}
-		text, _ := button.Text()
-		if !clickElementWithHumanBehavior(ctx, page, button, text) {
+		scrollToFloorEnd(page, rootID)
+		humanize.Delay(ctx, humanize.BetweenScroll)
+		n := 0
+		if button := threadExpandButton(page, rootID); button != nil {
+			text, _ := button.Text()
+			if clickElementWithHumanBehavior(ctx, page, button, text) {
+				n = 1
+			}
+		} else {
+			n = expandNearbyReplies(ctx, page)
+		}
+		if n == 0 {
 			break
 		}
-		clicked++
+		clicked += n
 	}
 	return clicked
+}
+
+// scrollToFloorEnd 把这一楼最后一条评论滚进视野：展开按钮跟在楼末。
+func scrollToFloorEnd(page *rod.Page, rootID string) {
+	last, err := page.Timeout(2 * time.Second).ElementByJS(rod.Eval(`(id) => {
+		const root = document.getElementById('comment-' + id);
+		const floor = root && root.closest('.parent-comment');
+		const items = floor ? floor.querySelectorAll('.comment-item') : [];
+		return items.length ? items[items.length - 1] : root;
+	}`, rootID))
+	if err != nil || last == nil {
+		return
+	}
+	if err := last.ScrollIntoView(); err != nil {
+		logrus.Debugf("滚到楼末失败: %v", err)
+	}
 }
 
 // threadExpandButton 这一楼里第一个可点的展开回复按钮；没有返回 nil。每轮重新找，展开后页面会重画。
