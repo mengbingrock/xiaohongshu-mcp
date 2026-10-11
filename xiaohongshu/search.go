@@ -98,8 +98,18 @@ type SearchAction struct {
 	page *rod.Page
 }
 
+// 搜索的等待上限。结果到了就提前返回，上限只在页面慢的时候起作用。
+// 从美西服务器打开海外站 rednote，首屏结果要 30–37 秒才出来（2026-10-11 实测），
+// 原先的「首屏 20 秒、整体 60 秒」会让带筛选的搜索稳定超时；整体上限要低于 marketing-agent 客户端的 180 秒。
+// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+const (
+	searchTimeout        = 150 * time.Second // 一次搜索（导航、首屏、筛选、读结果）的总上限
+	searchReadyTimeout   = 50 * time.Second  // 等首屏结果
+	filterRefreshTimeout = 20 * time.Second  // 每点一个筛选项后等结果刷新
+)
+
 func NewSearchAction(page *rod.Page) *SearchAction {
-	pp := page.Timeout(60 * time.Second)
+	pp := page.Timeout(searchTimeout)
 
 	return &SearchAction{page: pp}
 }
@@ -111,14 +121,14 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		return nil, err
 	}
 
-	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 60s deadline，必须在其后重新 Timeout，
+	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 deadline，必须在其后重新 Timeout，
 	// 否则页面等待没有 deadline 可依赖，异常时会永久挂起。
-	page := s.page.Context(ctx).Timeout(60 * time.Second)
+	page := s.page.Context(ctx).Timeout(searchTimeout)
 
 	searchURL := makeSearchURL(keyword)
 	page.MustNavigate(searchURL)
 	page.MustWaitLoad()
-	if waitSearchReady(page, 20*time.Second) == searchEmpty {
+	if waitSearchReady(page, searchReadyTimeout) == searchEmpty {
 		return []Feed{}, nil // 页面明确显示没有结果：筛选面板也不会出现，不必再等
 	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
@@ -163,7 +173,7 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			}
 		}
 
-		waitFeedsChanged(page, before, 15*time.Second)
+		waitFeedsChanged(page, before, filterRefreshTimeout)
 	}
 
 	result := page.MustEval(`() => {
