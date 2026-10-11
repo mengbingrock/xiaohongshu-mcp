@@ -23,6 +23,11 @@ var ErrCommentNotFound = errors.New("评论不在页面上")
 // 也给整个请求的耗时封顶（调用方 180 秒超时，查找评论本身最多 90 秒）。
 const maxThreadExpandRounds = 5
 
+// maxIdleExpandRounds 连续这么多轮一个都没点开才放弃。2026-10-11 实测：同一楼（4 条回复）第一次读，
+// 找到评论后 3 秒就返回、一下没点开，只读回 1 条；再读一次就点开读全了。点击会偶发失败（页面重画后
+// 刚找到的按钮就失效了），一轮没点开不算数，下一轮重新找按钮再点。
+const maxIdleExpandRounds = 2
+
 // CommentThread 一楼评论：楼主评论，回复在 Thread.SubComments 里。
 type CommentThread struct {
 	FeedID string  `json:"feed_id"`
@@ -75,13 +80,13 @@ func threadRootID(el *rod.Element) (string, error) {
 	return rootID, nil
 }
 
-// expandThread 把这一楼折叠的回复展开，直到页面状态里的回复条数够了、没有可点的按钮，或到轮数上限。
-// 返回点开的次数。以结果（页面状态里的条数）为准，不以找没找到按钮为准：2026-10-10 实测，以楼主为锚点
-// 时只在楼里找按钮一个都没找到，只读回第一条回复；找评论时展开视野里的按钮那套却能读全。所以每轮先把
-// 楼末滚进视野（按钮在楼末），楼里找不到按钮就展开视野里的。
+// expandThread 把这一楼折叠的回复展开，直到页面状态里的回复条数够了、连续 maxIdleExpandRounds 轮没点开，
+// 或到轮数上限。返回点开的次数。以结果（页面状态里的条数）为准，不以找没找到按钮为准：2026-10-10 实测，
+// 以楼主为锚点时只在楼里找按钮一个都没找到，只读回第一条回复；找评论时展开视野里的按钮那套却能读全。
+// 所以每轮先把楼末滚进视野（按钮在楼末），楼里的按钮找不到或点不上，就展开视野里的（重新找一遍按钮）。
 func expandThread(ctx context.Context, page *rod.Page, feedID, rootID string) int {
-	clicked := 0
-	for round := 0; round < maxThreadExpandRounds; round++ {
+	clicked, idle := 0, 0
+	for round := 0; round < maxThreadExpandRounds && idle < maxIdleExpandRounds; round++ {
 		if thread, err := readThreadState(page, feedID, rootID); err == nil && thread.Complete {
 			break
 		}
@@ -93,12 +98,15 @@ func expandThread(ctx context.Context, page *rod.Page, feedID, rootID string) in
 			if clickElementWithHumanBehavior(ctx, page, button, text) {
 				n = 1
 			}
-		} else {
+		}
+		if n == 0 {
 			n = expandNearbyReplies(ctx, page)
 		}
 		if n == 0 {
-			break
+			idle++
+			continue
 		}
+		idle = 0
 		clicked += n
 	}
 	return clicked
