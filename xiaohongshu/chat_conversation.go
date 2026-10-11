@@ -344,9 +344,9 @@ func jsonStrings(raw string, depth int) []string {
 	return out
 }
 
-// ---- 监听 /api/im/ ----
+// ---- 监听页面的接口请求（私信页的 /api/im/，发布页的创作中心接口）----
 
-// imCapture 记下页面 /api/im/ 每个路径最近一次响应的原文和收到的次数，以及所有 /api/im/ 请求和 WebSocket（排查用）。
+// imCapture 记下页面上匹配的接口每个路径最近一次响应的原文和收到的次数，以及所有匹配的请求和 WebSocket（排查用）。
 type imCapture struct {
 	mu       sync.Mutex
 	requests []string
@@ -359,6 +359,11 @@ type imCapture struct {
 }
 
 func captureIM(ctx context.Context, page *rod.Page) (*imCapture, error) {
+	return captureAPI(ctx, page, func(u *url.URL) bool { return strings.HasPrefix(u.Path, imPathPrefix) })
+}
+
+// captureAPI 监听 match 认的请求：请求记「方法 域名路径」，JSON 响应按路径留最近一次。
+func captureAPI(ctx context.Context, page *rod.Page, match func(*url.URL) bool) (*imCapture, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	p := page.Context(ctx)
 	if err := (proto.NetworkEnable{}).Call(p); err != nil {
@@ -372,9 +377,9 @@ func captureIM(ctx context.Context, page *rod.Page) (*imCapture, error) {
 	paths := map[proto.NetworkRequestID]string{}
 	wait := p.EachEvent(
 		func(e *proto.NetworkRequestWillBeSent) {
-			if u, err := url.Parse(e.Request.URL); err == nil && strings.HasPrefix(u.Path, imPathPrefix) {
+			if u, err := url.Parse(e.Request.URL); err == nil && match(u) {
 				c.mu.Lock()
-				c.requests = append(c.requests, e.Request.Method+" "+u.Path)
+				c.requests = append(c.requests, e.Request.Method+" "+u.Host+u.Path)
 				c.mu.Unlock()
 				if e.Request.Method != "OPTIONS" {
 					paths[e.RequestID] = u.Path

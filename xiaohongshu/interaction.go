@@ -63,6 +63,7 @@ func (e *DuplicateError) Error() string {
 type InteractionReceipt struct {
 	State        string `json:"state"`
 	CommentID    string `json:"comment_id,omitempty"`
+	NoteID       string `json:"note_id,omitempty"` // 发笔记：平台给的笔记 id（Modified for ycl-2004/xiaohongshu-mcp）
 	HTTPStatus   int    `json:"http_status,omitempty"`
 	Code         string `json:"code,omitempty"`
 	Reason       string `json:"reason,omitempty"`
@@ -190,6 +191,25 @@ func observeSubmission(page *rod.Page, endpoint, feedID, content string) *submis
 // observeSubmissionMatching 同 observeSubmission，但由 onPath（请求路径）和 match（请求体）决定哪个请求是
 // 这次的提交：删除评论要同时核对笔记和评论 id；私信的发送接口只知道在 /api/im/ 下面。
 func observeSubmissionMatching(page *rod.Page, onPath func(string) bool, feedID, content string, match func(string) bool) *submissionObserver {
+	return observeSubmissionSpec(page, submissionSpec{
+		onPath: onPath,
+		match:  match,
+		field:  func(body string) string { return submissionTargetField(body, feedID) },
+		parse: func(status int, body []byte) InteractionReceipt {
+			return parseSubmissionResponse(status, body, feedID, content)
+		},
+	})
+}
+
+// submissionSpec 怎么认出这次的提交请求（路径、请求体），以及怎么读它的回包。
+type submissionSpec struct {
+	onPath func(path string) bool
+	match  func(body string) bool
+	field  func(body string) string // 请求体里认出目标的字段名（记进回执，排查用）
+	parse  func(status int, body []byte) InteractionReceipt
+}
+
+func observeSubmissionSpec(page *rod.Page, spec submissionSpec) *submissionObserver {
 	ctx, cancel := context.WithCancel(page.GetContext())
 	p := page.Context(ctx)
 	o := &submissionObserver{cancel: cancel, done: make(chan struct{})}
@@ -210,7 +230,7 @@ func observeSubmissionMatching(page *rod.Page, onPath func(string) bool, feedID,
 				return
 			}
 			u, err := url.Parse(e.Request.URL)
-			if err != nil || !onPath(u.Path) {
+			if err != nil || !spec.onPath(u.Path) {
 				return
 			}
 			body := e.Request.PostData
@@ -221,10 +241,10 @@ func observeSubmissionMatching(page *rod.Page, onPath func(string) bool, feedID,
 				}
 				body = r.PostData
 			}
-			if !match(body) {
+			if !spec.match(body) {
 				return
 			}
-			requests[e.RequestID] = pendingResponse{field: submissionTargetField(body, feedID)}
+			requests[e.RequestID] = pendingResponse{field: spec.field(body)}
 			o.mu.Lock()
 			o.result.State = StateUnknown
 			o.mu.Unlock()
@@ -249,7 +269,7 @@ func observeSubmissionMatching(page *rod.Page, onPath func(string) bool, feedID,
 					data, err = base64.StdEncoding.DecodeString(body.Body)
 				}
 				if err == nil {
-					r = parseSubmissionResponse(req.status, data, feedID, content)
+					r = spec.parse(req.status, data)
 				}
 			}
 			r.RequestField = req.field
@@ -312,26 +332,20 @@ func submissionTargetField(body, feedID string) string {
 	return ""
 }
 
-func parseSubmissionResponse(status int, body []byte, feedID, content string) InteractionReceipt {
-	r := InteractionReceipt{State: StateUnknown, HTTPStatus: status}
+// businessReceipt 读回包的通用部分：业务码、成败、拦截原因词。ok 为假时 r 就是结论（被拒或结果不明）；
+// 为真时业务上成功，data 交给调用方核对具体内容。只带出短数字业务码和固定原因词，不回显服务端任意文本。
+func businessReceipt(status int, body []byte) (r InteractionReceipt, data json.RawMessage, ok bool) {
+	r = InteractionReceipt{State: StateUnknown, HTTPStatus: status}
 	var v struct {
 		Success *bool           `json:"success"`
 		Code    json.RawMessage `json:"code"`
 		Msg     string          `json:"msg"`
 		Message string          `json:"message"`
-		Data    struct {
-			ID      string `json:"id"`
-			Comment struct {
-				ID      string `json:"id"`
-				Content string `json:"content"`
-				NoteID  string `json:"note_id"`
-			} `json:"comment"`
-		} `json:"data"`
+		Data    json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(body, &v) != nil {
-		return r
+		return r, nil, false
 	}
-	// 只带出短数字业务码，不回显服务端任意文本。
 	code := strings.Trim(string(v.Code), `"`)
 	if len(code) <= 12 && code != "" && strings.Trim(code, "-0123456789") == "" {
 		r.Code = code
@@ -345,25 +359,43 @@ func parseSubmissionResponse(status int, body []byte, feedID, content string) In
 	}
 	if v.Success != nil && !*v.Success || r.Code != "" && r.Code != "0" {
 		r.State = StateRejected
+		return r, nil, false
+	}
+	if status < 200 || status >= 300 || v.Success == nil && r.Code != "0" {
+		return r, nil, false
+	}
+	return r, v.Data, true
+}
+
+func parseSubmissionResponse(status int, body []byte, feedID, content string) InteractionReceipt {
+	r, raw, ok := businessReceipt(status, body)
+	if !ok {
 		return r
 	}
-	if status < 200 || status >= 300 {
-		return r
+	var data struct {
+		ID      string `json:"id"`
+		Comment struct {
+			ID      string `json:"id"`
+			Content string `json:"content"`
+			NoteID  string `json:"note_id"`
+		} `json:"comment"`
 	}
-	if v.Success == nil && r.Code != "0" {
-		return r
+	_ = json.Unmarshal(raw, &data)
+	var envelope struct {
+		Success *bool `json:"success"`
 	}
+	_ = json.Unmarshal(body, &envelope)
 	if content != "" {
-		c := v.Data.Comment
+		c := data.Comment
 		if c.Content != "" && !sameText(c.Content, content) || c.NoteID != "" && c.NoteID != feedID {
 			return r
 		}
 		r.CommentID = c.ID
 		if r.CommentID == "" {
-			r.CommentID = v.Data.ID
+			r.CommentID = data.ID
 		}
 		// 只有 code=0、既没有 success 也没有评论 id 的陌生回包，不能当作已发出。
-		if v.Success == nil && r.CommentID == "" {
+		if envelope.Success == nil && r.CommentID == "" {
 			return r
 		}
 	}
