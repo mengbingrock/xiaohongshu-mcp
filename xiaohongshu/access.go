@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 // 页面访问拦截的错误码。调用方遇到这些要停下等人处理，而不是重试。
@@ -103,7 +104,7 @@ func ProbePageAccess(page *rod.Page) (*PageAccess, error) {
 // ProbeExplore 打开发现页并读取访问状态：操作失败后用它判断是不是被平台拦了。
 func ProbeExplore(ctx context.Context, page *rod.Page) (*PageAccess, error) {
 	p := page.Context(ctx).Timeout(60 * time.Second)
-	if err := p.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+	if err := p.Navigate(site.Current().WebURL("/explore")); err != nil {
 		return nil, err
 	}
 	if err := p.WaitLoad(); err != nil {

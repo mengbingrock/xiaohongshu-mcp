@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"runtime"
@@ -97,6 +98,10 @@ func NewBrowser(headless bool, options ...Option) *headless_browser.Browser {
 	if data, err := cookieLoader.LoadCookies(); err == nil {
 		opts = append(opts, headless_browser.WithCookies(string(data)))
 		logrus.Debugf("loaded cookies from filesuccessfully")
+	} else if errors.Is(err, cookies.ErrSiteMismatch) {
+		// 不能当成没登录继续跑：那样会以访客身份操作另一个站点。
+		// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+		panic(fmt.Sprintf("会话文件和站点不符，拒绝启动: %v", err))
 	} else {
 		logrus.Warnf("failed to load cookies: %v", err)
 	}

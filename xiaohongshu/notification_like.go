@@ -9,6 +9,7 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 // NotificationLikeResult 通知点赞的结果。
@@ -32,7 +33,7 @@ func (n *NotificationAction) Like(ctx context.Context, commentID string, unlike 
 	want := !unlike
 	page := n.page.Timeout(3 * time.Minute)
 
-	page.MustNavigate("https://www.xiaohongshu.com/notification").MustWaitLoad()
+	page.MustNavigate(site.Current().WebURL("/notification")).MustWaitLoad()
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	target, index, err := n.locate(ctx, page, commentID)

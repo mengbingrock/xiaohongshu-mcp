@@ -5,7 +5,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 // Site holds everything that differs between Xiaohongshu's domestic property
@@ -41,9 +43,10 @@ var (
 )
 
 // SiteByKey returns the site for a stored key, defaulting to CN when unknown.
+// "rednote" is what older ycl-2004 builds stamped on INTL session files.
 func SiteByKey(key string) Site {
 	switch key {
-	case SiteINTL.Key:
+	case SiteINTL.Key, "rednote":
 		return SiteINTL
 	default:
 		return SiteCN
@@ -55,12 +58,21 @@ var (
 	currentSite = SiteCN
 )
 
-// SetSite selects the site subsequent login/publish navigations use. Nothing
-// calls it yet in Phase 1, so the default (CN) keeps every URL unchanged.
+// SetSite selects the site subsequent navigations use, and keeps the site
+// package (used by search, feeds, notifications, chat) in step. A process
+// pinned by XHS_SITE never switches: a login that lands on the other site is
+// logged and ignored. Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
 func SetSite(s Site) {
+	if site.Pinned() && !site.SameSite(site.Current().Key, s.Key) {
+		logrus.Warnf("站点钉在 %s（XHS_SITE），不切到 %s", site.Current().Name, s.Key)
+		return
+	}
 	siteMu.Lock()
 	currentSite = s
 	siteMu.Unlock()
+	if ps, err := site.Parse(s.Key); err == nil {
+		site.Set(ps)
+	}
 }
 
 // CurrentSite returns the active site (CN by default).
@@ -98,7 +110,7 @@ func ResolveSiteFromCookies(data []byte) Site {
 // then a classification of the saved cookies, then CN. Mirrors the seed
 // resolution so a deployment pinned by env is never overridden by the file.
 func ResolveSite(envKey string, store cookies.Cookier) Site {
-	if envKey == SiteCN.Key || envKey == SiteINTL.Key {
+	if envKey == SiteCN.Key || envKey == SiteINTL.Key || envKey == "rednote" {
 		return SiteByKey(envKey)
 	}
 	if store == nil {

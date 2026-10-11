@@ -13,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 type SearchResult struct {
@@ -340,5 +341,5 @@ func makeSearchURL(keyword string) string {
 
 	//https://www.xiaohongshu.com/search_result?keyword=%25E7%258E%258B%25E5%25AD%2590&source=web_search_result_notes
 	//https://www.xiaohongshu.com/search_result?keyword=%25E7%258E%258B%25E5%25AD%2590&source=web_explore_feed
-	return fmt.Sprintf("https://www.xiaohongshu.com/search_result?%s", values.Encode())
+	return site.Current().WebURL("/search_result?" + values.Encode())
 }

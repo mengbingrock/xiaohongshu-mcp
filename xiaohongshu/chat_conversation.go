@@ -159,7 +159,7 @@ func openConversation(ctx context.Context, page *rod.Page, capture *imCapture, u
 
 // openChatPage 打开私信页，等到会话列表（/api/im/web/v3/chats）并返回它的原文。没等到先看是不是被拦了。
 func openChatPage(ctx context.Context, page *rod.Page, capture *imCapture) (json.RawMessage, error) {
-	if err := page.Context(ctx).Navigate(chatURL); err != nil {
+	if err := page.Context(ctx).Navigate(chatURL()); err != nil {
 		return nil, err
 	}
 	list, err := capture.wait(ctx, conversationsPath, 0, chatListTimeout)

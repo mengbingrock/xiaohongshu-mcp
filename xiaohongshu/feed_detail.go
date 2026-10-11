@@ -16,6 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 // ========== 配置常量 ==========
@@ -1001,5 +1002,5 @@ func (f *FeedDetailAction) extractFeedDetail(page *rod.Page, feedID string) (*Fe
 }
 
 func makeFeedDetailURL(feedID, xsecToken string) string {
-	return fmt.Sprintf("https://www.xiaohongshu.com/explore/%s?xsec_token=%s&xsec_source=pc_feed", feedID, xsecToken)
+	return site.Current().WebURL(fmt.Sprintf("/explore/%s?xsec_token=%s&xsec_source=pc_feed", feedID, xsecToken))
 }

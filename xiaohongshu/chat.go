@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 const (
-	chatURL           = "https://www.xiaohongshu.com/chat"
 	conversationsPath = "/api/im/web/v3/chats"
 )
 
@@ -27,3 +27,6 @@ func ReadConversations(ctx context.Context, page *rod.Page, timeout time.Duratio
 	defer capture.close()
 	return openChatPage(ctx, page, capture)
 }
+
+// chatURL 当前站点的网页版私信页。
+func chatURL() string { return site.Current().WebURL("/chat") }

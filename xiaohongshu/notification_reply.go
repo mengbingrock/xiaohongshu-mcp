@@ -9,6 +9,7 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 // NotificationReplyResult 通知回复的结果。
@@ -30,7 +31,7 @@ func (n *NotificationAction) Reply(ctx context.Context, commentID, content strin
 
 	page := n.page.Timeout(3 * time.Minute)
 
-	page.MustNavigate("https://www.xiaohongshu.com/notification").MustWaitLoad()
+	page.MustNavigate(site.Current().WebURL("/notification")).MustWaitLoad()
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	target, index, err := n.locate(ctx, page, commentID)

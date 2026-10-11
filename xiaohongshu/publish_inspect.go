@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
+	"github.com/xpzouying/xiaohongshu-mcp/site"
 )
 
 // inspectKeywords 发布页上要找的控件文字：AI 合成声明、内容类型声明、可见范围、原创声明。
@@ -106,7 +107,7 @@ func applySettings(p *rod.Page, settings PublishSettings) map[string]string {
 
 // isCreatorAPI 创作中心和上传用到的小红书接口（不含静态资源）。
 func isCreatorAPI(u *url.URL) bool {
-	if !strings.HasSuffix(u.Hostname(), "xiaohongshu.com") {
+	if !site.Current().Owns(u.Hostname()) {
 		return false
 	}
 	return strings.Contains(u.Path, "/api/") || strings.Contains(u.Path, "/web_api/") || strings.Contains(u.Hostname(), "upload")

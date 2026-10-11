@@ -3,6 +3,7 @@ package main
 // Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"time"
@@ -78,6 +79,15 @@ func main() {
 		}
 	} else {
 		logrus.Warn("没给读、写 token：兼容模式（单 token AUTH_TOKEN、CORS、/mcp 开着）")
+	}
+	// 站点要在读会话文件之前定下来：不同站点的会话拒绝加载。
+	if s, pinned, err := configs.UseSiteFromEnv(); err != nil {
+		logrus.Fatalf("%v", err)
+	} else if pinned {
+		logrus.Infof("site pinned by %s: %s (%s)", "XHS_SITE", s.Name, s.Domain)
+	}
+	if _, err := cookies.NewLoadCookie(cookies.GetCookiesFilePath()).LoadCookies(); errors.Is(err, cookies.ErrSiteMismatch) {
+		logrus.Fatalf("%v", err)
 	}
 
 	// 只用内置浏览器。启动时就备好，缺它直接退出，不拖到第一个请求才失败。
