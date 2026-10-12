@@ -20,10 +20,16 @@ func NewCommentFeedAction(page *rod.Page) *CommentFeedAction {
 	return &CommentFeedAction{page: page}
 }
 
+// commentTimeout 发一条评论（打开详情页、点输入框、像人一样逐字输入、点发送、等回包）的总上限。
+// 海外站从服务器打开详情页就要 30 多秒，再加上逐字输入，2026-10-12 实测 60 秒在点发送之前就用完了（504，
+// 状态 not_sent，没发出）。150 秒和搜索、打开主页一致，也短于调用方（Marketing Agent）180 秒的读超时，
+// 免得这边还在发、那边已经当成结果不明。
+const commentTimeout = 150 * time.Second
+
 // PostComment 发表评论到 Feed
 func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, content, key string) (*InteractionReceipt, error) {
 	// 不使用 Context(ctx)，避免继承外部 context 的超时
-	page := f.page.Timeout(60 * time.Second)
+	page := f.page.Timeout(commentTimeout)
 
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("打开 feed 详情页: %s", url)
