@@ -28,7 +28,7 @@ func (n *NavigateAction) ToExplorePage(ctx context.Context) error {
 }
 
 func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
-	page := n.page.Context(ctx).Timeout(60 * time.Second) // 加超时保护，避免 MustNavigate/MustWaitStable 无限挂
+	page := n.page.Context(ctx).Timeout(profileTimeout) // 加超时保护，避免 MustNavigate/MustWaitStable 无限挂；先要加载发现页，比一般导航慢
 
 	// First navigate to explore page
 	if err := n.ToExplorePage(ctx); err != nil {

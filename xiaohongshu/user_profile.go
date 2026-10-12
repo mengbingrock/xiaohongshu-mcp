@@ -52,7 +52,7 @@ func NewUserProfileAction(page *rod.Page) *UserProfileAction {
 
 // UserProfile 获取用户基本信息及指定 tab 下的帖子
 func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken string, tab ProfileTab) (*UserProfileResponse, error) {
-	page := u.page.Context(ctx).Timeout(60 * time.Second) // 重设被 .Context 清掉的 deadline
+	page := u.page.Context(ctx).Timeout(profileTimeout) // 重设被 .Context 清掉的 deadline
 
 	searchURL := makeUserProfileURL(userID, xsecToken, tab)
 	page.MustNavigate(searchURL)
@@ -138,6 +138,10 @@ func (u *UserProfileAction) extractUserProfileData(page *rod.Page, tab ProfileTa
 	return response, nil
 }
 
+// profileTimeout 打开主页（导航、等页面稳定、读数据）的总上限。海外站从服务器打开很慢：
+// 经侧边栏进自己的主页要先加载发现页，2026-10-12 实测 60 秒不够（504）。和搜索的 150 秒一致。
+const profileTimeout = 150 * time.Second
+
 func makeUserProfileURL(userID, xsecToken string, tab ProfileTab) string {
 	url := site.Current().WebURL(fmt.Sprintf("/user/profile/%s?xsec_token=%s&xsec_source=pc_note", userID, xsecToken))
 	if tab != "" && tab != TabNotes {
@@ -147,7 +151,7 @@ func makeUserProfileURL(userID, xsecToken string, tab ProfileTab) string {
 }
 
 func (u *UserProfileAction) GetMyProfileViaSidebar(ctx context.Context, tab ProfileTab) (*UserProfileResponse, error) {
-	page := u.page.Context(ctx).Timeout(60 * time.Second) // 重设被 .Context 清掉的 deadline
+	page := u.page.Context(ctx).Timeout(profileTimeout) // 重设被 .Context 清掉的 deadline
 
 	// 创建导航动作
 	navigate := NewNavigate(page)
