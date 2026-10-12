@@ -91,6 +91,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		write.POST("/notifications/reply", appServer.replyNotificationHandler)
 		write.POST("/notifications/like", appServer.likeNotificationHandler)
 		write.POST("/feeds/comment/delete", appServer.deleteCommentHandler)
+		write.POST("/note/delete", appServer.deleteNoteHandler)
 		write.POST("/chat/reply", appServer.chatReplyHandler)
 	}
 
