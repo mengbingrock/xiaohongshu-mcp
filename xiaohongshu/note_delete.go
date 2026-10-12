@@ -21,8 +21,10 @@ var ErrNoteNotFound = errors.New("笔记管理里没有这篇笔记")
 
 const (
 	noteManagerPath    = "/new/note-manager"
-	noteManagerTimeout = 150 * time.Second // 服务器上打开海外站很慢（2026-10-12 实测一页 30–110 秒）
-	noteGoneTimeout    = 60 * time.Second
+	noteListPath       = "/api/galaxy/v2/creator/note/user/posted" // 笔记管理的列表接口（2026-10-12 实测）
+	noteManagerTimeout = 150 * time.Second                         // 服务器上打开海外站很慢（2026-10-12 实测一页 30–110 秒）
+	nextPageTimeout    = 60 * time.Second
+	maxNotePages       = 10
 	markedCard         = `[data-ma-delete-note="1"]`
 )
 
@@ -30,6 +32,7 @@ const (
 type NoteDeletion struct {
 	NoteID   string              `json:"note_id"`
 	Title    string              `json:"title"`              // 笔记管理接口里这篇的标题
+	Page     int                 `json:"page"`               // 在笔记管理的第几页
 	Matched  string              `json:"matched"`            // id：卡片里能找到笔记 id；title：按接口给的标题认出唯一一张
 	Dialog   string              `json:"dialog"`             // 确认弹窗的文字
 	DryRun   bool                `json:"dry_run"`            // 只演练：点开删除确认后点「取消」，没有删
@@ -43,9 +46,10 @@ type NoteDeletion struct {
 // DeleteOwnNote 在创作中心的笔记管理里删掉本账号自己发的一篇笔记。
 //
 // 只删笔记管理里列出来的（那里只有本账号的笔记）：先从笔记管理接口的回包里按笔记 id 找到这篇的标题，
-// 再在页面上找到这张卡片（卡片里有笔记 id 最好；没有就按标题，标题必须唯一），点「删除」，
+// 老笔记要往后翻页；再在页面上找到这张卡片（卡片里有笔记 id 最好；没有就按标题，标题必须唯一），点「删除」，
 // 确认弹窗出现后点「确定」。网页删除用的是哪个接口没有固定下来（2026-10-11 没抓到），所以不靠它判断结果：
-// 删完重新打开笔记管理，接口回包里没有这个笔记 id 了才算删掉（confirmed）；还在就是结果不明，不要重删，先核验。
+// 删完重新打开笔记管理、翻到原来那一页都没有这个笔记 id 了才算删掉（confirmed）；还在或核对不了就是结果不明，
+// 不要重删，先核验。
 // dryRun 只演练到确认弹窗，然后点「取消」。
 func DeleteOwnNote(ctx context.Context, page *rod.Page, noteID string, dryRun bool) (*NoteDeletion, error) {
 	capture, err := captureAPI(ctx, page, isCreatorAPI)
@@ -53,19 +57,22 @@ func DeleteOwnNote(ctx context.Context, page *rod.Page, noteID string, dryRun bo
 		return nil, err
 	}
 	defer capture.close()
-	p := page.Context(ctx).Timeout(5 * time.Minute)
+	p := page.Context(ctx).Timeout(9 * time.Minute) // 翻页找 + 删 + 删后再翻页核对，服务器上很慢
 	if err := ensureCreatorSession(p); err != nil {
 		return nil, err
 	}
 	out := &NoteDeletion{NoteID: noteID, DryRun: dryRun}
 	defer func() { out.Requests, out.Skipped = capture.requestLog(), capture.skippedLog() }()
 
-	title, listPath, err := openNoteManager(ctx, p, capture, noteID)
+	title, onPage, scanned, err := scanNotePages(ctx, p, capture, noteID, maxNotePages)
+	if err == nil && onPage == 0 {
+		err = fmt.Errorf("%w: 翻了 %d 页都没有", ErrNoteNotFound, scanned)
+	}
 	if err != nil {
 		out.Listed = listedNotes(capture.changedSince(nil))
 		return out, err
 	}
-	out.Title = title
+	out.Title, out.Page = title, onPage
 	located, err := markNoteCard(p, noteID, title)
 	out.Matched, out.Cards = located.Matched, located.Cards
 	if err != nil {
@@ -104,63 +111,106 @@ func DeleteOwnNote(ctx context.Context, page *rod.Page, noteID string, dryRun bo
 		return out, &InteractionError{Stage: "click", State: StateUnknown, Cause: err}
 	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
-	if err := waitNoteGone(ctx, p, capture, listPath, noteID); err != nil {
-		return out, &InteractionError{Stage: "confirm", State: StateUnknown, Cause: err}
+	// 删掉以后后面的笔记往前挪：重新打开、翻到原来那一页为止都没有它，才算删掉
+	if _, still, _, err := scanNotePages(ctx, p, capture, noteID, onPage); err != nil || still > 0 {
+		if err == nil {
+			err = fmt.Errorf("删后笔记管理第 %d 页还有这篇", still)
+		}
+		return out, &InteractionError{Stage: "confirm", State: StateUnknown,
+			Cause: fmt.Errorf("核对不了删没删掉，不要重删，先在 App 里看一下: %w", err)}
 	}
 	logrus.Infof("Note deleted: note=%s title=%q", noteID, title)
 	out.Receipt = &InteractionReceipt{State: StateConfirmed, NoteID: noteID}
 	return out, nil
 }
 
-// openNoteManager 打开笔记管理，等它的列表接口回包里出现这个笔记 id，返回接口里的标题和列表接口的路径。
-func openNoteManager(ctx context.Context, p *rod.Page, capture *imCapture, noteID string) (string, string, error) {
-	before := capture.snapshot()
+// scanNotePages 打开笔记管理，一页一页往后翻（最多 maxPages 页），看列表接口的每一页里有没有这篇笔记。
+// 返回它的标题和在第几页（没找到为 0），以及看了几页；第一页都没等到才返回错误。
+// 列表每页 10 篇、按发布时间倒序（2026-10-12 实测），老笔记要往后翻。
+func scanNotePages(ctx context.Context, p *rod.Page, capture *imCapture, noteID string, maxPages int) (string, int, int, error) {
+	seen := capture.count(noteListPath)
 	if err := p.Navigate(site.Current().CreatorURL(noteManagerPath)); err != nil {
-		return "", "", fmt.Errorf("打开笔记管理失败: %w", err)
+		return "", 0, 0, fmt.Errorf("打开笔记管理失败: %w", err)
 	}
-	deadline := time.Now().Add(noteManagerTimeout)
-	for {
-		if path, title := noteInBodies(capture.changedSince(before), noteID); path != "" {
+	for page := 1; page <= maxPages; page++ {
+		wait := nextPageTimeout
+		if page == 1 {
+			wait = noteManagerTimeout
+		}
+		body, err := nextListPage(ctx, capture, &seen, wait)
+		if err != nil {
+			if page == 1 {
+				return "", 0, 0, fmt.Errorf("%s 内没等到笔记管理的列表: %w", wait, err)
+			}
+			return "", 0, page - 1, nil // 翻不动了：没有下一页
+		}
+		if path, title := noteInBodies(map[string]json.RawMessage{noteListPath: body}, noteID); path != "" {
 			humanize.Delay(ctx, humanize.Reading)
-			return title, path, nil
+			return title, page, page, nil
+		}
+		if page == maxPages || len(listedNotes(map[string]json.RawMessage{noteListPath: body})) == 0 {
+			return "", 0, page, nil
+		}
+		if err := turnNotePage(ctx, p); err != nil {
+			return "", 0, page, nil
+		}
+	}
+	return "", 0, maxPages, nil
+}
+
+// nextListPage 等列表接口再回一次包（seen 是已经看过的次数），返回这一页的回包。
+func nextListPage(ctx context.Context, capture *imCapture, seen *int, wait time.Duration) (json.RawMessage, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		if n := capture.count(noteListPath); n > *seen {
+			*seen = n
+			return capture.changedSince(nil)[noteListPath], nil
 		}
 		if time.Now().After(deadline) {
-			return "", "", fmt.Errorf("%w: %s 内笔记管理的接口回包里没有它", ErrNoteNotFound, noteManagerTimeout)
+			return nil, errors.New("列表接口没有回包")
 		}
 		select {
 		case <-ctx.Done():
-			return "", "", ctx.Err()
+			return nil, ctx.Err()
 		case <-capture.notify:
 		case <-time.After(time.Second):
 		}
 	}
 }
 
-// waitNoteGone 重新打开笔记管理，等删之前列出这篇的同一个列表接口再回一次包；回包里没有这个笔记 id 了才算删掉。
-func waitNoteGone(ctx context.Context, p *rod.Page, capture *imCapture, listPath, noteID string) error {
-	before := capture.snapshot()
-	if err := p.Navigate(site.Current().CreatorURL(noteManagerPath)); err != nil {
-		return fmt.Errorf("删后重新打开笔记管理失败: %w", err)
+// turnNotePage 翻到下一页：有「下一页」按钮就点，没有就滚到底（列表也可能是往下滚自动加载）。
+func turnNotePage(ctx context.Context, p *rod.Page) error {
+	next, err := p.Timeout(3 * time.Second).ElementByJS(rod.Eval(nextPageJS))
+	if err == nil && next != nil {
+		if err := next.ScrollIntoView(); err != nil {
+			return err
+		}
+		humanize.Delay(ctx, humanize.BetweenScroll)
+		return humanize.Click(next)
 	}
-	deadline := time.Now().Add(noteGoneTimeout + noteManagerTimeout)
-	for {
-		if body, ok := capture.changedSince(before)[listPath]; ok {
-			if path, _ := noteInBodies(map[string]json.RawMessage{listPath: body}, noteID); path != "" {
-				return errors.New("删后笔记管理里还有这篇：不要重删，先在 App 里看一下")
+	_, err = p.Eval(`() => {
+		window.scrollTo(0, document.body.scrollHeight);
+		for (const el of document.querySelectorAll('*')) {
+			if (el.scrollHeight > el.clientHeight + 40 && /(auto|scroll)/.test(getComputedStyle(el).overflowY)) {
+				el.scrollTop = el.scrollHeight;
 			}
-			return nil
 		}
-		if time.Now().After(deadline) {
-			return errors.New("删后重新打开笔记管理没等到列表：不要重删，先在 App 里看一下")
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-capture.notify:
-		case <-time.After(time.Second):
-		}
-	}
+	}`)
+	return err
 }
+
+// nextPageJS 显示出来、没禁用的「下一页」：分页器里的 next，或者文字是「下一页」「>」的按钮。
+const nextPageJS = `() => {
+	const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+	const disabled = e => e.matches('[disabled], [aria-disabled="true"], [class*="disabled"]') ||
+		!!e.closest('[class*="disabled"]');
+	const candidates = [
+		...document.querySelectorAll('[class*="pagination"] [class*="next"], [class*="pager"] [class*="next"]'),
+		...[...document.querySelectorAll('button, li, a, span')].filter(e =>
+			e.childElementCount === 0 && ['下一页', '>', '›'].includes(e.textContent.trim())),
+	];
+	return candidates.find(e => visible(e) && !disabled(e)) || null;
+}`
 
 // noteLocation 页面上认卡片的结果。
 type noteLocation struct {
