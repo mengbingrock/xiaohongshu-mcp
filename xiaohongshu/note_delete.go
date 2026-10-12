@@ -35,6 +35,8 @@ type NoteDeletion struct {
 	DryRun   bool                `json:"dry_run"`            // 只演练：点开删除确认后点「取消」，没有删
 	Cards    []string            `json:"cards,omitempty"`    // 演练时页面上每张卡片的摘要（标题、有没有笔记 id），排查用
 	Requests []string            `json:"requests,omitempty"` // 网页发的创作中心请求（方法 + 域名路径）
+	Listed   []string            `json:"listed,omitempty"`   // 没找到这篇时：笔记管理接口里列出的笔记（id 标题），排查用
+	Skipped  []string            `json:"skipped,omitempty"`  // 没留下的接口响应（太大或不是 JSON）
 	Receipt  *InteractionReceipt `json:"receipt,omitempty"`  // 真删：state confirmed = 重新打开笔记管理已经没有这篇
 }
 
@@ -56,10 +58,11 @@ func DeleteOwnNote(ctx context.Context, page *rod.Page, noteID string, dryRun bo
 		return nil, err
 	}
 	out := &NoteDeletion{NoteID: noteID, DryRun: dryRun}
-	defer func() { out.Requests = capture.requestLog() }()
+	defer func() { out.Requests, out.Skipped = capture.requestLog(), capture.skippedLog() }()
 
 	title, listPath, err := openNoteManager(ctx, p, capture, noteID)
 	if err != nil {
+		out.Listed = listedNotes(capture.changedSince(nil))
 		return out, err
 	}
 	out.Title = title
@@ -323,4 +326,34 @@ func findNote(v any, noteID string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// listedNotes 回包里列出的笔记：同时带 id 和标题的对象，写成「id 标题」。
+func listedNotes(bodies map[string]json.RawMessage) []string {
+	var out []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch node := v.(type) {
+		case map[string]any:
+			id := firstString(node, "id", "note_id", "noteId")
+			title := firstString(node, "display_title", "displayTitle", "title")
+			if id != "" && title != "" {
+				out = append(out, id+" "+title)
+			}
+			for _, child := range node {
+				walk(child)
+			}
+		case []any:
+			for _, child := range node {
+				walk(child)
+			}
+		}
+	}
+	for _, body := range bodies {
+		var v any
+		if json.Unmarshal(body, &v) == nil {
+			walk(v)
+		}
+	}
+	return out
 }

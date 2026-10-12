@@ -351,6 +351,7 @@ type imCapture struct {
 	mu       sync.Mutex
 	requests []string
 	sockets  []string
+	skipped  []string // 没留下的响应（太大或不是 JSON）：排查「接口回了但没看到」用
 	bodies   map[string]json.RawMessage
 	counts   map[string]int
 	notify   chan struct{}
@@ -410,6 +411,9 @@ func captureAPI(ctx context.Context, page *rod.Page, match func(*url.URL) bool) 
 				}
 			}
 			if len(data) > maxIMBody || !json.Valid(data) {
+				c.mu.Lock()
+				c.skipped = append(c.skipped, fmt.Sprintf("%s（%d 字节，%s）", path, len(data), skipReason(data)))
+				c.mu.Unlock()
 				return
 			}
 			c.mu.Lock()
@@ -439,6 +443,19 @@ func (c *imCapture) requestLog() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string{}, c.requests...)
+}
+
+func (c *imCapture) skippedLog() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string{}, c.skipped...)
+}
+
+func skipReason(data []byte) string {
+	if len(data) > maxIMBody {
+		return "太大"
+	}
+	return "不是 JSON"
 }
 
 func (c *imCapture) socketLog() []string {
