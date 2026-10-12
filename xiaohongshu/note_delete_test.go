@@ -24,3 +24,12 @@ func TestNoteInBodiesFindsTheListThatHasTheNoteAndItsTitle(t *testing.T) {
 	assert.Equal(t, "/x", path)
 	assert.Empty(t, title)
 }
+
+func TestDialogTitleMatchesTruncatedTitles(t *testing.T) {
+	dialog := "删除笔记\n删除后将无法恢复，确定要删除《嘉义搭子12.27-》这篇笔记吗\n取消\n确定"
+	assert.True(t, dialogTitleMatches(dialog, "嘉义搭子12.27-12.28"))
+	assert.False(t, dialogTitleMatches(dialog, "温哥华来chat 回吧"))
+	assert.True(t, dialogTitleMatches("确定要删除《很长的标题…》吗", "很长的标题后面还有字"))
+	assert.False(t, dialogTitleMatches("确定要删除《》吗", "随便"), "书名号里是空的认不出，不删")
+	assert.True(t, dialogTitleMatches("确定删除这篇笔记吗", "随便"), "弹窗没写标题：卡片已经按 id 认过")
+}

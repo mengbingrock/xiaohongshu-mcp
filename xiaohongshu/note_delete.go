@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -90,8 +91,7 @@ func DeleteOwnNote(ctx context.Context, page *rod.Page, noteID string, dryRun bo
 		return out, &InteractionError{Stage: "prepare", State: StateNotSent, Cause: err}
 	}
 	out.Dialog, _ = dialog.Text()
-	if title != "" && !strings.Contains(out.Dialog, title) && strings.Contains(out.Dialog, "《") {
-		// 弹窗写了标题（书名号）却不是这篇：点错了卡片，不删
+	if !dialogTitleMatches(out.Dialog, title) { // 弹窗写的标题不是这篇：点错了卡片，不删
 		closeNoteDialog(dialog)
 		return out, &InteractionError{Stage: "confirm_title", State: StateNotSent,
 			Cause: fmt.Errorf("确认弹窗里的标题对不上：%q", out.Dialog)}
@@ -335,6 +335,19 @@ func closeNoteDialog(dialog *rod.Element) {
 }
 
 // ---- 解析（纯函数，单测覆盖）----
+
+var dialogTitle = regexp.MustCompile(`《(.*?)》`)
+
+// dialogTitleMatches 确认弹窗里书名号中的标题是不是这篇。弹窗会把长标题截短（2026-10-12 实测
+// 「嘉义搭子12.27-12.28」显示成《嘉义搭子12.27-》），所以认前缀；弹窗没写标题就不核对（卡片已经认过）。
+func dialogTitleMatches(dialog, title string) bool {
+	found := dialogTitle.FindStringSubmatch(dialog)
+	if found == nil || title == "" {
+		return true
+	}
+	shown := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(found[1]), "…."))
+	return shown != "" && strings.HasPrefix(title, shown)
+}
 
 // noteInBodies 接口回包里有没有这个笔记 id：返回列出它的接口路径（没有为空）和它的标题。认 id、note_id、noteId 三种写法。
 func noteInBodies(bodies map[string]json.RawMessage, noteID string) (string, string) {
