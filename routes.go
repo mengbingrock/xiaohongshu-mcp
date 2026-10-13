@@ -93,6 +93,9 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		write.POST("/feeds/comment/delete", appServer.deleteCommentHandler)
 		write.POST("/note/delete", appServer.deleteNoteHandler)
 		write.POST("/chat/reply", appServer.chatReplyHandler)
+		// 扫码会话状态（login/qrcode 的结果）：只读内存，但和取二维码是一对，也放在写 token 下。
+		// Modified for ycl-2004/xiaohongshu-mcp.
+		write.GET("/login/qrcode/state", appServer.loginQrcodeStateHandler)
 	}
 
 	return router

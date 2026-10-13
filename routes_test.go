@@ -296,6 +296,8 @@ func TestStrictRoutesRegistered(t *testing.T) {
 		"POST /api/v1/feeds/comment/delete",
 		"POST /api/v1/note/delete",
 		"POST /api/v1/chat/reply",
+		"GET /api/v1/login/qrcode",
+		"GET /api/v1/login/qrcode/state",
 	} {
 		assert.True(t, registered[want], "路由 %s 应已注册", want)
 	}
@@ -321,6 +323,9 @@ func TestRouteScopes(t *testing.T) {
 		{"写路由接受写 token", http.MethodPost, "/api/v1/feeds/comment", write, http.StatusBadRequest},
 		{"评论缺幂等 key 被参数校验拦下", http.MethodPost, "/api/v1/feeds/comment", write, http.StatusBadRequest},
 		{"回复拒绝读 token", http.MethodPost, "/api/v1/feeds/comment/reply", read, http.StatusForbidden},
+		{"取登录二维码会改账号状态，拒绝读 token", http.MethodGet, "/api/v1/login/qrcode", read, http.StatusForbidden},
+		{"扫码会话状态拒绝读 token", http.MethodGet, "/api/v1/login/qrcode/state", read, http.StatusForbidden},
+		{"扫码会话状态只读内存，写 token 直接返回", http.MethodGet, "/api/v1/login/qrcode/state", write, http.StatusOK},
 		{"发布拒绝读 token", http.MethodPost, "/api/v1/publish", read, http.StatusForbidden},
 		{"发布页探查会上传图片，拒绝读 token", http.MethodPost, "/api/v1/publish/inspect", read, http.StatusForbidden},
 		{"发布页探查缺图片被参数校验拦下", http.MethodPost, "/api/v1/publish/inspect", write, http.StatusBadRequest},

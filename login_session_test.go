@@ -211,3 +211,30 @@ func TestLoginSessionCodeSubmission(t *testing.T) {
 		assert.NoError(t, <-done)
 	})
 }
+
+// TestLoginQrcodeSnapshot /login/qrcode/state 的简化状态：没取过、等扫码、扫上了，旧会话不盖掉新会话。
+func TestLoginQrcodeSnapshot(t *testing.T) {
+	var l loginSessions
+	seq, state, _ := l.snapshot()
+	assert.Equal(t, uint64(0), seq)
+	assert.Equal(t, loginStateNone, state)
+
+	old, err := l.start(func() {}, nil, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	current, err := l.start(func() {}, nil, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	l.finish(old, LoginSessionExpired, "")
+	seq, state, detail := l.snapshot()
+	assert.Equal(t, current.seq, seq)
+	assert.Equal(t, loginStateWaiting, state, "旧会话的结果不该盖掉新会话的等扫码")
+	assert.Equal(t, LoginSessionWaitingForScan, detail)
+
+	l.observe(current, LoginSessionOTPRequired, "")
+	_, state, detail = l.snapshot()
+	assert.Equal(t, loginStateWaiting, state, "扫上了在等验证码也还是等")
+	assert.Equal(t, LoginSessionOTPRequired, detail)
+
+	l.finish(current, LoginSessionAuthenticated, "")
+	_, state, _ = l.snapshot()
+	assert.Equal(t, loginStateSuccess, state)
+}

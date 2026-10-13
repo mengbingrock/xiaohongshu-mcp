@@ -193,6 +193,43 @@ func (l *loginSessions) finish(session *loginSession, state LoginSessionState, l
 	session.challengeImage = nil
 }
 
+// Simplified scan states for GET /login/qrcode/state, which Marketing_Agent
+// polls with only the numeric session it got from GET /login/qrcode.
+// Added in ycl-2004/xiaohongshu-mcp; see NOTICE.
+const (
+	loginStateNone    = "none"    // 还没取过二维码
+	loginStateWaiting = "waiting" // 二维码已发出，等扫码（扫上了在等验证码、人机验证也算）
+	loginStateSuccess = "success" // 扫上了，cookie 已保存，新浏览器里也能用
+	loginStateExpired = "expired" // 到时间没扫上，或被新的二维码取代
+	loginStateFailed  = "failed"  // 扫上了但 cookie 没存下来或不能复用
+)
+
+// simpleLoginState 把细分的会话状态归成上面五种。
+func simpleLoginState(state LoginSessionState) string {
+	switch state {
+	case LoginSessionAuthenticated:
+		return loginStateSuccess
+	case LoginSessionFailed:
+		return loginStateFailed
+	case LoginSessionExpired, LoginSessionCancelled:
+		return loginStateExpired
+	case "":
+		return loginStateNone
+	default:
+		return loginStateWaiting
+	}
+}
+
+// snapshot 最近一个会话的序号、简化状态和细分状态；还没取过二维码时序号是 0。
+func (l *loginSessions) snapshot() (seq uint64, state string, detail LoginSessionState) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.current == nil {
+		return 0, loginStateNone, ""
+	}
+	return l.current.seq, simpleLoginState(l.current.state), l.current.state
+}
+
 func (l *loginSessions) status(sessionID string) (LoginSessionStatus, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +19,8 @@ import (
 	rodinput "github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
 type LoginAction struct {
@@ -443,7 +445,23 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 		return "", true, nil
 	}
 
-	src, err := pp.MustElement(".login-container .qrcode-img").Attribute("src")
+	// 中文站没登录时自动弹出登录框；海外站不弹，要先点侧栏的「登录」（2026-10-13 实测）。
+	// 页面上另有一个「下载 App」的二维码，所以只认登录框里的；等不到就报错，不挂到客户端超时。
+	// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+	if has, _, _ := pp.Has(".login-container .qrcode-img"); !has {
+		button, err := pp.Timeout(qrcodeTimeout).Element("button.login-btn")
+		if err != nil {
+			return "", false, errors.Wrap(err, "没有登录框，也找不到「登录」按钮")
+		}
+		if err := humanize.Click(button); err != nil {
+			return "", false, errors.Wrap(err, "点「登录」失败")
+		}
+	}
+	img, err := pp.Timeout(qrcodeTimeout).Element(".login-container .qrcode-img")
+	if err != nil {
+		return "", false, errors.Wrap(err, "登录框里没有二维码")
+	}
+	src, err := img.Attribute("src")
 	if err != nil {
 		return "", false, errors.Wrap(err, "get qrcode src failed")
 	}
@@ -464,6 +482,12 @@ func (a *LoginAction) WaitForLoginWithState(ctx context.Context, observe func(Lo
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	// 海外站实测过「手机显示登录成功、网页不跟进」（2026-10-11）：会话 cookie 已经换了，页面没刷新。
+	// 所以另外盯着会话 cookie，变了之后页面还是没跟进，就刷新一次再看。只在 cookie 变了之后刷新：
+	// 提前刷新会换掉用户手里那张二维码。Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+	before := sessionCookies(a.page)
+	var changedAt time.Time
+	reloaded := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -479,8 +503,49 @@ func (a *LoginAction) WaitForLoginWithState(ctx context.Context, observe func(Lo
 			if observe != nil {
 				observe(observation)
 			}
+			if reloaded {
+				continue
+			}
+			if changedAt.IsZero() {
+				if now := sessionCookies(a.page); now != "" && now != before {
+					changedAt = time.Now()
+				}
+				continue
+			}
+			if time.Since(changedAt) > followGrace {
+				logrus.Info("会话 cookie 已经换了、页面没跟进：刷新一次确认登录")
+				reloaded = true
+				a.mu.Lock()
+				_ = a.page.Context(ctx).Reload()
+				a.mu.Unlock()
+			}
 		}
 	}
+}
+
+// qrcodeTimeout 等登录框和二维码出现的上限。
+const qrcodeTimeout = 30 * time.Second
+
+// followGrace 会话 cookie 变了之后，给页面自己跟进的时间；过了还没跟进才刷新。
+const followGrace = 3 * time.Second
+
+// sessionCookieNames 两个站点的主站会话 cookie。
+var sessionCookieNames = map[string]bool{"web_session": true, "id_token": true}
+
+// sessionCookies 浏览器里会话 cookie 的指纹（名=值，排好序）；读不到返回空串。
+func sessionCookies(page *rod.Page) string {
+	cookies, err := page.Cookies(nil)
+	if err != nil {
+		return ""
+	}
+	var parts []string
+	for _, c := range cookies {
+		if sessionCookieNames[c.Name] {
+			parts = append(parts, c.Name+"="+c.Value)
+		}
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ";")
 }
 
 // ObserveLoginState inspects the visible login UI. The phone login form always

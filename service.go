@@ -61,6 +61,17 @@ type LoginQrcodeResponse struct {
 	SessionID  string            `json:"session_id,omitempty"`
 	State      LoginSessionState `json:"state,omitempty"`
 	ExpiresAt  time.Time         `json:"expires_at,omitempty"`
+	// Session 这次扫码会话的序号，配合 /login/qrcode/state 看结果（Added in ycl-2004/xiaohongshu-mcp）
+	Session uint64 `json:"session,omitempty"`
+}
+
+// LoginQrcodeStateResponse 最近一次扫码会话的状态：State 是 none / waiting / success / expired / failed，
+// Detail 是细分状态（waiting_for_scan、otp_required 等，见 LoginSessionState）。
+// Added in ycl-2004/xiaohongshu-mcp; see NOTICE.
+type LoginQrcodeStateResponse struct {
+	Session uint64            `json:"session"`
+	State   string            `json:"state"`
+	Detail  LoginSessionState `json:"detail,omitempty"`
 }
 
 // SubmitLoginCodeRequest submits an OTP to the browser page retained by a QR
@@ -212,6 +223,7 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context, visible bool) (
 	}
 	if session != nil {
 		response.SessionID = session.id
+		response.Session = session.seq
 		// The background observer may already be updating session.state. The QR
 		// response deliberately reports the initial state; callers use the
 		// session-status endpoint for subsequent transitions.
@@ -247,6 +259,12 @@ func (s *XiaohongshuService) savedSessionReusable(ctx context.Context, seq uint6
 		time.Sleep(2 * time.Second)
 	}
 	return false
+}
+
+// LoginQrcodeState 最近一次扫码会话的状态：只读内存里的登记，不开浏览器。
+func (s *XiaohongshuService) LoginQrcodeState() *LoginQrcodeStateResponse {
+	session, state, detail := s.logins.snapshot()
+	return &LoginQrcodeStateResponse{Session: session, State: state, Detail: detail}
 }
 
 // waitScanInBackground 在后台等用户扫码，扫上了就存 cookie。
