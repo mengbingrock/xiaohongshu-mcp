@@ -523,7 +523,7 @@ func (a *LoginAction) WaitForLoginWithState(ctx context.Context, observe func(Lo
 	}
 }
 
-// qrcodeTimeout 等登录框和二维码出现的上限。
+// qrcodeTimeout 等登录框和二维码出现的上限：原来没有上限，选择器对不上时请求会一直挂着。
 const qrcodeTimeout = 30 * time.Second
 
 // followGrace 会话 cookie 变了之后，给页面自己跟进的时间；过了还没跟进才刷新。
