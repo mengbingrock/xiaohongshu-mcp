@@ -24,8 +24,9 @@ func TestSearch(t *testing.T) {
 
 	action := NewSearchAction(page)
 
-	feeds, err := action.Search(context.Background(), "Kimi")
+	found, err := action.Search(context.Background(), "Kimi")
 	require.NoError(t, err)
+	feeds := found.Feeds
 	require.NotEmpty(t, feeds, "feeds should not be empty")
 
 	fmt.Printf("成功获取到 %d 个 Feed\n", len(feeds))
@@ -55,8 +56,10 @@ func TestSearchWithFilters(t *testing.T) {
 		Location:    "不限",
 	}
 
-	feeds, err := action.Search(context.Background(), "无锡 夏天 遛娃 凉快 户外", filter)
+	found, err := action.Search(context.Background(), "无锡 夏天 遛娃 凉快 户外", filter)
 	require.NoError(t, err)
+	require.Empty(t, found.Unapplied)
+	feeds := found.Feeds
 	require.NotEmpty(t, feeds, "feeds should not be empty")
 
 	fmt.Printf("成功获取到 %d 个筛选后的 Feed\n", len(feeds))

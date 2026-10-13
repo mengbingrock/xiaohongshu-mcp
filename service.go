@@ -103,6 +103,8 @@ type PublishVideoResponse struct {
 type FeedsListResponse struct {
 	Feeds []xiaohongshu.Feed `json:"feeds"`
 	Count int                `json:"count"`
+	// 搜索时点了、但网页没有为它重新搜索的筛选项（结果没按它筛）。Added in ycl-2004/xiaohongshu-mcp.
+	UnappliedFilters []string `json:"unapplied_filters,omitempty"`
 }
 
 // UserProfileResponse 用户主页响应
@@ -639,14 +641,15 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 
 	action := xiaohongshu.NewSearchAction(page)
 
-	feeds, err := action.Search(ctx, keyword, filters...)
+	found, err := action.Search(ctx, keyword, filters...)
 	if err != nil {
 		return nil, err
 	}
 
 	response := &FeedsListResponse{
-		Feeds: feeds,
-		Count: len(feeds),
+		Feeds:            found.Feeds,
+		Count:            len(found.Feeds),
+		UnappliedFilters: found.Unapplied,
 	}
 
 	return response, nil

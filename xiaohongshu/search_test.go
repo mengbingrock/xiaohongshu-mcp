@@ -133,3 +133,18 @@ func TestFilterGroupsCoverFilterOption(t *testing.T) {
 		require.NotNil(t, g.pick, "%s 没有取值函数", g.label)
 	}
 }
+
+func TestSearchRequestFilters(t *testing.T) {
+	t.Run("只摘筛选字段，不带关键词", func(t *testing.T) {
+		body := `{"keyword":"合伙人纠纷","page":1,"sort":"general","note_type":0,` +
+			`"filters":[{"tags":["一周内"],"type":"filter_note_time"}],"geo":""}`
+		got := searchRequestFilters(body)
+		require.JSONEq(t, `{"sort":"general","note_type":0,`+
+			`"filters":[{"tags":["一周内"],"type":"filter_note_time"}],"geo":""}`, got)
+		require.NotContains(t, got, "合伙人纠纷")
+	})
+
+	t.Run("请求体不是 JSON 只记长度", func(t *testing.T) {
+		require.Equal(t, "（请求体不是 JSON，3 字节）", searchRequestFilters("a=b"))
+	})
+}

@@ -7,9 +7,12 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
@@ -105,8 +108,17 @@ type SearchAction struct {
 const (
 	searchTimeout        = 150 * time.Second // 一次搜索（导航、首屏、筛选、读结果）的总上限
 	searchReadyTimeout   = 50 * time.Second  // 等首屏结果
-	filterRefreshTimeout = 20 * time.Second  // 每点一个筛选项后等结果刷新
+	filterRefreshTimeout = 20 * time.Second  // 每点一个筛选项后等网页为它重新搜索
+	filterSettleTimeout  = 5 * time.Second   // 搜索回包到了之后，等新结果换上（结果可能和原来一样，到点就算）
 )
+
+// SearchResults 一次搜索的结果。Unapplied 是点了、但网页没有为它重新搜索的筛选项（如「位置距离:同城」），
+// 这时结果没按它筛过：调用方要据此提示，不能当成筛过的数据用。
+// Added in ycl-2004/xiaohongshu-mcp; see NOTICE.
+type SearchResults struct {
+	Feeds     []Feed
+	Unapplied []string
+}
 
 func NewSearchAction(page *rod.Page) *SearchAction {
 	pp := page.Timeout(searchTimeout)
@@ -114,7 +126,7 @@ func NewSearchAction(page *rod.Page) *SearchAction {
 	return &SearchAction{page: pp}
 }
 
-func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
+func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) (*SearchResults, error) {
 	// 先校验筛选取值，必须在导航之前——写错的值不该先向平台发一次请求再报错。
 	pending, err := collectFilters(filters)
 	if err != nil {
@@ -129,36 +141,29 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	page.MustNavigate(searchURL)
 	page.MustWaitLoad()
 	if waitSearchReady(page, searchReadyTimeout) == searchEmpty {
-		return []Feed{}, nil // 页面明确显示没有结果：筛选面板也不会出现，不必再等
+		return &SearchResults{Feeds: []Feed{}}, nil // 页面明确显示没有结果：筛选面板也不会出现，不必再等
 	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
+	var unapplied []string
 	if len(pending) > 0 {
-		// 悬停在筛选按钮上展开面板
-		filterButton := page.MustElement(`div.filter`)
-		if err := humanize.Hover(filterButton); err != nil {
-			return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
-		}
-		humanize.Delay(ctx, humanize.BeforeClick)
+		requests := observeSearchRequests(page)
+		defer requests.close()
 
-		// 等待筛选面板出现
-		page.MustWait(`() => document.querySelector('div.filter-panel') !== null`)
-
-		// 记下筛选前的结果，用来判断筛选后的数据什么时候到位
-		before := readFeedIDs(page)
-
-		// 指针先进面板，之后的移动都限制在面板内。
-		// 从按钮直接拉到选项的话，路径会有一段既不在按钮上、也还没进面板。
-		bounds, err := panelBounds(page)
+		bounds, err := openFilterPanel(ctx, page)
 		if err != nil {
 			return nil, err
 		}
-		if err := humanize.MoveInto(page, bounds); err != nil {
-			return nil, fmt.Errorf("移入筛选面板失败: %w", err)
-		}
 
+		// 一项一项点，每项都等网页为它重新搜索、结果换上之后再点下一项。
+		// 原先连着点完只等一次「结果换了一批」：第一项的结果一到就返回，后面几项可能还没生效。
 		// 用 ClickNoWait：筛选面板是 hover 浮层，rod 的 WaitInteractable 会误判被遮挡而死等。
 		for _, pf := range pending {
+			if !filterPanelOpen(page) { // 等结果的这几秒里浮层可能收起
+				if bounds, err = openFilterPanel(ctx, page); err != nil {
+					return nil, err
+				}
+			}
 			option, err := findFilterOption(page, pf)
 			if err != nil {
 				return nil, err
@@ -168,12 +173,16 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 				bounds = b
 			}
 			humanize.Delay(ctx, humanize.BeforeClick)
+			beforeIDs, beforeDone := readFeedIDs(page), requests.finished.Load()
 			if err := humanize.ClickNoWaitInside(option, bounds); err != nil {
 				return nil, fmt.Errorf("点击筛选选项「%s」失败: %w", pf.option, err)
 			}
+			if !waitFilterApplied(page, requests, beforeIDs, beforeDone) {
+				logrus.Warnf("筛选「%s:%s」点了，网页 %s 内没有重新搜索：结果没按它筛", pf.group, pf.option, filterRefreshTimeout)
+				unapplied = append(unapplied, pf.group+":"+pf.option)
+			}
 		}
-
-		waitFeedsChanged(page, before, filterRefreshTimeout)
+		requests.logIfUnmatched()
 	}
 
 	result := page.MustEval(`() => {
@@ -198,7 +207,7 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
 	}
 
-	return onlyNotes(feeds), nil
+	return &SearchResults{Feeds: onlyNotes(feeds), Unapplied: unapplied}, nil
 }
 
 // feedIDsJS 读当前结果集的 id 列表，用来判断数据有没有换一批。
@@ -249,23 +258,157 @@ func waitSearchReady(page *rod.Page, timeout time.Duration) string {
 	return searchPending
 }
 
-// waitFeedsChanged 等筛选后的数据到位。
+// waitFilterApplied 点了一个筛选项之后，等网页为它重新搜索：结果换了一批，或者搜索请求的回包到了
+// （再等一会儿让新结果换上；新结果可能和原来一样，到点就算）。都没等到就是这一项没生效，
+// 例如服务器上的浏览器没有位置，点「同城」网页不会重新搜索（2026-10-12 实测）。
 //
-// 点完筛选项之后不能立刻读结果：站点是先把 feeds 清空、再灌入新数据，
-// 中间这段时间读到的要么是空，要么还是筛选前那一批。原先用
-// MustWait(__INITIAL_STATE__ !== undefined) 等，而这个条件从首屏起就为真、
-// 立即返回，等于没等——多个筛选项一起用时表现为只有一部分生效。
-//
-// 超时不报错：筛选已经点上了，宁可返回可能偏旧的数据，也不要整个搜索失败。
-func waitFeedsChanged(page *rod.Page, before string, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
+// 不能点完立刻读结果：站点是先把 feeds 清空、再灌入新数据，中间读到的要么是空，要么还是上一批。
+// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
+func waitFilterApplied(page *rod.Page, requests *searchRequests, beforeIDs string, beforeDone int64) bool {
+	deadline := time.Now().Add(filterRefreshTimeout)
 	for time.Now().Before(deadline) {
-		if now := readFeedIDs(page); now != "" && now != before {
-			return
+		if feedsReplaced(page, beforeIDs) {
+			return true
+		}
+		if requests.finished.Load() > beforeDone {
+			settle := time.Now().Add(filterSettleTimeout)
+			for time.Now().Before(settle) && !feedsReplaced(page, beforeIDs) {
+				time.Sleep(300 * time.Millisecond)
+			}
+			return true
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	logrus.Warnf("筛选后等待结果刷新超时（%s），返回的可能是筛选前的数据", timeout)
+	return false
+}
+
+func feedsReplaced(page *rod.Page, before string) bool {
+	now := readFeedIDs(page)
+	return now != "" && now != before
+}
+
+// searchNotesPath 网页搜索笔记的接口路径（POST …/api/sns/web/v1/search/notes）。
+const searchNotesPath = "/search/notes"
+
+// searchRequests 数筛选阶段网页发出、并已收到回包的搜索请求，并把请求里的筛选字段记进日志，
+// 核对平台实际收到了什么。认请求的路径要是对不上（平台改版），只剩「结果换了一批」这一个信号，
+// logIfUnmatched 会把看到的搜索类请求路径记下来。
+// Added in ycl-2004/xiaohongshu-mcp; see NOTICE.
+type searchRequests struct {
+	cancel   context.CancelFunc
+	done     chan struct{}
+	finished atomic.Int64
+
+	mu   sync.Mutex
+	seen []string // 含 search 的 POST 路径（没认出来时排查用）
+}
+
+func observeSearchRequests(page *rod.Page) *searchRequests {
+	ctx, cancel := context.WithCancel(page.GetContext())
+	p := page.Context(ctx)
+	o := &searchRequests{cancel: cancel, done: make(chan struct{})}
+	if err := (proto.NetworkEnable{}).Call(p); err != nil {
+		logrus.Warnf("监听搜索请求失败，只按结果有没有换一批判断筛选是否生效: %v", err)
+		cancel()
+		close(o.done)
+		return o
+	}
+	pending := map[proto.NetworkRequestID]bool{}
+	wait := p.EachEvent(
+		func(e *proto.NetworkRequestWillBeSent) {
+			if e.Request.Method != "POST" {
+				return
+			}
+			u, err := url.Parse(e.Request.URL)
+			if err != nil || !strings.Contains(u.Path, "search") {
+				return
+			}
+			if !strings.HasSuffix(u.Path, searchNotesPath) {
+				o.mu.Lock()
+				o.seen = append(o.seen, u.Path)
+				o.mu.Unlock()
+				return
+			}
+			pending[e.RequestID] = true
+			body := e.Request.PostData
+			if body == "" {
+				if r, err := (proto.NetworkGetRequestPostData{RequestID: e.RequestID}).Call(p); err == nil {
+					body = r.PostData
+				}
+			}
+			logrus.Infof("搜索请求的筛选：%s", searchRequestFilters(body))
+		},
+		func(e *proto.NetworkLoadingFinished) {
+			if pending[e.RequestID] {
+				delete(pending, e.RequestID)
+				o.finished.Add(1)
+			}
+		},
+		func(e *proto.NetworkLoadingFailed) {
+			delete(pending, e.RequestID)
+		},
+	)
+	go func() { defer close(o.done); wait() }()
+	return o
+}
+
+func (o *searchRequests) close() { o.cancel(); <-o.done }
+
+func (o *searchRequests) logIfUnmatched() {
+	if o.finished.Load() > 0 {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	logrus.Warnf("筛选阶段没有认出搜索请求（找的是 …%s），看到的搜索类 POST：%v", searchNotesPath, o.seen)
+}
+
+// searchRequestFilters 从搜索请求体里只摘出和筛选有关的字段（不记关键词）。
+func searchRequestFilters(body string) string {
+	var req map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		return fmt.Sprintf("（请求体不是 JSON，%d 字节）", len(body))
+	}
+	picked := map[string]json.RawMessage{}
+	for _, key := range []string{"sort", "note_type", "filters", "geo"} {
+		if v, ok := req[key]; ok {
+			picked[key] = v
+		}
+	}
+	out, err := json.Marshal(picked)
+	if err != nil {
+		return "（筛选字段读不出来）"
+	}
+	return string(out)
+}
+
+// openFilterPanel 悬停在筛选按钮上展开面板，再把指针移进面板，之后的移动都限制在面板内。
+// 从按钮直接拉到选项的话，路径会有一段既不在按钮上、也还没进面板。
+func openFilterPanel(ctx context.Context, page *rod.Page) (humanize.Rect, error) {
+	filterButton := page.MustElement(`div.filter`)
+	if err := humanize.Hover(filterButton); err != nil {
+		return humanize.Rect{}, fmt.Errorf("悬停筛选按钮失败: %w", err)
+	}
+	humanize.Delay(ctx, humanize.BeforeClick)
+	page.MustWait(`() => document.querySelector('div.filter-panel') !== null`)
+	bounds, err := panelBounds(page)
+	if err != nil {
+		return humanize.Rect{}, err
+	}
+	if err := humanize.MoveInto(page, bounds); err != nil {
+		return humanize.Rect{}, fmt.Errorf("移入筛选面板失败: %w", err)
+	}
+	return bounds, nil
+}
+
+// filterPanelOpen 筛选浮层还开着：在页面上、看得见、占着位置。
+func filterPanelOpen(page *rod.Page) bool {
+	has, panel, err := page.Has("div.filter-panel")
+	if err != nil || !has || !humanize.Visible(panel) {
+		return false
+	}
+	_, err = panelBounds(page)
+	return err == nil
 }
 
 // panelBounds 取筛选面板当前占据的矩形。
