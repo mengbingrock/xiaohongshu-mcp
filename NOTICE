@@ -1,4 +1,4 @@
-xiaohongshu-mcp (ycl-2004 patched distribution for Marketing_Agent)
+xiaohongshu-mcp (mengbingrock fork with the ycl-2004 Marketing_Agent patches)
 
 This distribution is derived from:
 https://github.com/xpzouying/xiaohongshu-mcp
@@ -11,8 +11,24 @@ upstream above. Ported parts are marked in their file headers.
 third_party/headless_browser is a copy of https://github.com/xpzouying/headless_browser v0.4.0
 (MIT License, third_party/headless_browser/LICENSE) with one change: the --no-sandbox flag is optional.
 
-Changes in this distribution (branch ma/patches) include: separate read and write bearer tokens,
-loopback-only listening, MCP endpoint off by default, no CORS, reduced HTTP routes, private
+Branch ma/patches is https://github.com/mengbingrock/xiaohongshu-mcp main (ChineseInLA, Reddit,
+international rednote login, SMS/OTP login, video covers, runtime proxy) with the ycl-2004
+Marketing_Agent patches rebased on top. Where both changed the same thing they were merged:
+- Access: setting AUTH_TOKEN_READ and AUTH_TOKEN_WRITE (or -token-read/-token-write) turns on strict
+  mode (two required tokens, loopback-only listening, no CORS, /mcp off unless -enable-mcp).
+  Without them the fork's single AUTH_TOKEN mode (CORS, /mcp on) is unchanged. All routes stay
+  registered; in strict mode logins, publishing, comments, likes and deletes need the write token.
+- Site: the fork's xiaohongshu.Site (cn / intl, resolved from XHS_SITE, the session file, then
+  cookies) stays the source of truth and keeps package site in step. Setting XHS_SITE (cn, rednote
+  or intl) pins the process: sessions of the other site are refused, never overwritten, and a
+  login that lands on the other site does not switch it. Files stamped "rednote" by older ycl-2004
+  builds read as intl.
+- QR login: the fork's login sessions (OTP, security QR) are kept; GET /login/qrcode also returns a
+  numeric session, and GET /login/qrcode/state reports it as none / waiting / success / expired /
+  failed (raw state in detail).
+
+Changes from the ycl-2004 patches include: separate read and write bearer tokens,
+loopback-only listening, MCP endpoint off by default, no CORS, private
 atomic cookie writes, one browser operation at a time, browser sandbox kept on macOS,
 structured timeout and page-access error codes, comment submission receipts with idempotency
 keys, reply attribution on notifications, reading one comment thread with its replies, deleting the account's own comment (ported from liaogx), read-only private message listing, reading and replying in existing private conversations (no new conversations), publishing notes with a content-type declaration (e.g. AI-generated content), visibility and declaration read back before publishing, publish receipts with the note id, a publish-page inspection that never publishes, choosing the Chinese site or the overseas rednote site

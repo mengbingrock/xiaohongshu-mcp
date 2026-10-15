@@ -106,7 +106,7 @@ func (t *publishTrace) AttachNetwork(page *rod.Page) {
 			return
 		}
 		url := e.Response.URL
-		if !strings.Contains(url, "xiaohongshu.com") {
+		if !strings.Contains(url, "xiaohongshu.com") && !strings.Contains(url, "rednote.com") {
 			return
 		}
 		t.recordHTTPError(fmt.Sprintf("%d %s %s", e.Response.Status, e.Type, url))
