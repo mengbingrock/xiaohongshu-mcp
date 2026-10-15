@@ -345,8 +345,11 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	logrus.Infof("登录状态检查: url=%s user_element=%v", finalURL, exists)
 
 	if !exists {
+		// 没有登录后的用户入口就是没登录：返回 false，不当成检查失败。上游一直是这样（errors.Wrap(nil) 是 nil），
+		// 调用方靠它区分「要重新扫码」和「检查本身出错」；落到哪个页面已经记在上面的日志和截图里。
+		// Modified for ycl-2004/xiaohongshu-mcp; see NOTICE.
 		trace.Capture(pp, "explore_not_logged_in")
-		return false, errors.Errorf("login status element not found (url=%s)", finalURL)
+		return false, nil
 	}
 
 	trace.Capture(pp, "explore_logged_in")
