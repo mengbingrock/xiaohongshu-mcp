@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"slices"
 	"time"
@@ -656,6 +657,7 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 
 	page := b.NewPage()
 	defer page.Close()
+	defer lingerBeforeClose()
 
 	action := xiaohongshu.NewSearchAction(page)
 
@@ -685,6 +687,7 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 
 	page := b.NewPage()
 	defer page.Close()
+	defer lingerBeforeClose()
 
 	action := xiaohongshu.NewFeedDetailAction(page)
 
@@ -889,6 +892,12 @@ func (s *XiaohongshuService) ReplyNotification(ctx context.Context, commentID, c
 	defer page.Close()
 
 	return xiaohongshu.NewNotificationAction(page).Reply(ctx, commentID, content)
+}
+
+// lingerBeforeClose 搜索、读帖拿到数据后，关页面前停 2–3 秒：像人看一眼结果再走，
+// 页面上的图片也来得及加载（客户在网页版看到的浏览器画面才是完整的页面）。
+func lingerBeforeClose() {
+	time.Sleep(2*time.Second + time.Duration(rand.Intn(1000))*time.Millisecond)
 }
 
 func newBrowser() *headless_browser.Browser {
